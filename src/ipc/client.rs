@@ -172,6 +172,10 @@ impl DaemonClient for InProcessClient {
                 self.core.refresh_random().await;
                 Ok(DaemonResponse::Ok)
             }
+            DaemonRequest::RefreshRandomAlbums => {
+                self.core.refresh_random_albums().await;
+                Ok(DaemonResponse::Ok)
+            }
             DaemonRequest::RefreshArtists => {
                 self.core.refresh_artists().await;
                 Ok(DaemonResponse::Ok)
@@ -271,10 +275,6 @@ impl DaemonClient for InProcessClient {
             }
             DaemonRequest::SetScrobble(on) => {
                 self.core.set_scrobble(on).await.map_err(err)?;
-                Ok(DaemonResponse::Ok)
-            }
-            DaemonRequest::SetNotifications(on) => {
-                self.core.set_notifications(on).await.map_err(err)?;
                 Ok(DaemonResponse::Ok)
             }
             DaemonRequest::SetRepeatMode(mode) => {

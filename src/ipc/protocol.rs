@@ -60,6 +60,8 @@ pub enum DaemonRequest {
     RefreshStarred,
     /// Re-fetch the random-songs list from the server.
     RefreshRandom,
+    /// Re-fetch the random-albums list from the server.
+    RefreshRandomAlbums,
     /// Re-fetch the artist index from the server.
     RefreshArtists,
     /// Re-fetch the playlist list from the server.
@@ -131,8 +133,6 @@ pub enum DaemonRequest {
     SetAutoContinue(bool),
     /// Enable or disable reporting plays to the server (scrobbling).
     SetScrobble(bool),
-    /// Enable or disable desktop notifications on track change.
-    SetNotifications(bool),
     /// Set the repeat mode and persist the choice.
     SetRepeatMode(RepeatMode),
     /// Enable or disable cover art rendering.

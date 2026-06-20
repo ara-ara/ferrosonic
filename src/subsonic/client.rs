@@ -31,10 +31,6 @@ impl SubsonicClient {
 
         let http = Client::builder()
             .user_agent(CLIENT_NAME)
-            // Bound every API call so a hung (not refused) server cannot
-            // stall library, star, or scrobble requests indefinitely.
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(SubsonicError::Http)?;
 
@@ -216,11 +212,12 @@ impl SubsonicClient {
             .map_err(|e| SubsonicError::Parse(format!("Failed to parse ping response: {}", e)))?;
 
         if parsed.subsonic_response.status != "ok" {
-            let (code, message) = match parsed.subsonic_response.error {
-                Some(e) => (e.code, e.message),
-                None => (0, "Unknown error".to_string()),
-            };
-            return Err(SubsonicError::Api { code, message });
+            if let Some(error) = parsed.subsonic_response.error {
+                return Err(SubsonicError::Api {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
         }
 
         info!("Server ping successful");
@@ -243,6 +240,25 @@ impl SubsonicClient {
 
         debug!("Fetched {} songs", songs.len());
         Ok(songs)
+    }
+
+    /// Fetch a batch of 100 random albums.
+    pub async fn get_random_albums(&self) -> Result<Vec<Child>, SubsonicError> {
+        const PAGE: u32 = 100;
+        //let mut album_list: Vec<Album> = Vec::new();
+        let offset = 0;
+        let album_list: Vec<Album> = self
+                .get_album_list2("random", PAGE, offset)
+                .await?;
+
+        let mut song_list: Vec<Child> = Vec::new();
+        for album in album_list.into_iter() {
+            let (_a, s) = self.get_album(&album.id).await?;
+            song_list.extend(s);   
+        }
+
+        debug!("Fetched {} songs", song_list.len());
+        Ok(song_list)
     }
 
     /// Fetch the full artist index, flattened across index letters.
@@ -315,11 +331,12 @@ impl SubsonicClient {
             .map_err(|e| SubsonicError::Parse(format!("Failed to parse artist response: {}", e)))?;
 
         if parsed.subsonic_response.status != "ok" {
-            let (code, message) = match parsed.subsonic_response.error {
-                Some(e) => (e.code, e.message),
-                None => (0, "Unknown error".to_string()),
-            };
-            return Err(SubsonicError::Api { code, message });
+            if let Some(error) = parsed.subsonic_response.error {
+                return Err(SubsonicError::Api {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
         }
 
         let detail = parsed
@@ -355,11 +372,12 @@ impl SubsonicClient {
             .map_err(|e| SubsonicError::Parse(format!("Failed to parse album response: {}", e)))?;
 
         if parsed.subsonic_response.status != "ok" {
-            let (code, message) = match parsed.subsonic_response.error {
-                Some(e) => (e.code, e.message),
-                None => (0, "Unknown error".to_string()),
-            };
-            return Err(SubsonicError::Api { code, message });
+            if let Some(error) = parsed.subsonic_response.error {
+                return Err(SubsonicError::Api {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
         }
 
         let detail = parsed
@@ -410,11 +428,12 @@ impl SubsonicClient {
         })?;
 
         if parsed.subsonic_response.status != "ok" {
-            let (code, message) = match parsed.subsonic_response.error {
-                Some(e) => (e.code, e.message),
-                None => (0, "Unknown error".to_string()),
-            };
-            return Err(SubsonicError::Api { code, message });
+            if let Some(error) = parsed.subsonic_response.error {
+                return Err(SubsonicError::Api {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
         }
 
         let detail = parsed
@@ -479,7 +498,6 @@ impl SubsonicClient {
     /// assert!(url.contains("u=alice"));
     /// assert!(url.contains("&t="));
     /// assert!(url.contains("&s="));
-    /// assert!(url.contains("format=raw"));
     /// ```
     pub fn get_stream_url(&self, song_id: &str) -> Result<String, SubsonicError> {
         let mut url = self.base_url.join("rest/stream")?;
@@ -492,10 +510,7 @@ impl SubsonicClient {
             .append_pair("t", &token)
             .append_pair("s", &salt)
             .append_pair("v", API_VERSION)
-            .append_pair("c", CLIENT_NAME)
-            // No server-side transcode: stream the original bytes so the
-            // decoded rate matches the source and playback stays bit-perfect.
-            .append_pair("format", "raw");
+            .append_pair("c", CLIENT_NAME);
 
         Ok(url.to_string())
     }

@@ -31,8 +31,6 @@ impl DaemonCore {
             }
         };
 
-        // New album: drop cached cover art so changed artwork shows fresh.
-        self.clear_cover_cache().await;
         self.broadcast_queue_changed().await;
 
         let Some((song, stream_url, idx)) = prepared else {
@@ -129,7 +127,6 @@ impl DaemonCore {
             state.queue = songs.clone();
             state.queue_position = None;
         }
-        self.clear_cover_cache().await;
         self.emit(DaemonEvent::RandomChanged(songs));
         self.emit_queue().await;
         self.play_queue_position(0, PlayMode::Buffered).await

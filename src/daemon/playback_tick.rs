@@ -176,66 +176,26 @@ impl DaemonCore {
     }
 
     /// Verify-then-commit a gapless advance: under one write lock, re-derive the next song and atomically swap state. Returns whether the advance happened.
-    /// Test seam: run a gapless advance and discard the internal outcome.
-    #[doc(hidden)]
-    pub async fn try_gapless_advance_for_test(self: &Arc<Self>) {
-        let _ = self.try_gapless_advance().await;
-    }
-
     async fn try_gapless_advance(self: &Arc<Self>) -> GaplessOutcome {
-        // DIAG (temporary): mpv state at the gapless trigger; a wrong-track
-        // advance shows as mpv dur not matching the expected next-song dur.
-        let (mpos, mcount, mdur, mtime) = {
-            let mut mpv = self.mpv.lock().await;
-            (
-                mpv.get_playlist_pos().await.ok().flatten(),
-                mpv.get_playlist_count().await.ok(),
-                mpv.get_duration().await.unwrap_or(0.0),
-                mpv.get_time_pos().await.unwrap_or(0.0),
-            )
-        };
-        let (next_pos, diag) = {
+        let next_pos = {
             let mut state = self.state.write().await;
             let queue_len = state.queue.len();
             let repeat = state.config.repeat_mode;
-            let cur = state.queue_position;
-            let now_title = state
-                .now_playing
-                .song
-                .as_ref()
-                .map(|x| x.title.clone())
-                .unwrap_or_default();
-            let resolved = cur.and_then(|c| {
+            let resolved = state.queue_position.and_then(|cur| {
                 repeat
-                    .next_auto(c, queue_len)
+                    .next_auto(cur, queue_len)
                     .and_then(|n| state.queue.get(n).map(|s| (n, s.clone())))
             });
             if let Some((next_pos, song)) = resolved {
-                let diag = (
-                    cur,
-                    now_title,
-                    song.title.clone(),
-                    song.duration.unwrap_or(0),
-                );
                 state.queue_position = Some(next_pos);
                 state.now_playing.song = Some(song.clone());
                 state.now_playing.position = 0.0;
                 state.now_playing.duration = song.duration.unwrap_or(0) as f64;
-                // Clear so the tick re-probes + re-pins; a gapless jump across
-                // sample rates must not stay pinned to the previous track's rate.
-                state.now_playing.sample_rate = None;
-                state.now_playing.bit_depth = None;
-                (Some(next_pos), Some(diag))
+                Some(next_pos)
             } else {
-                (None, None)
+                None
             }
         };
-        if let Some((cur, now, next_title, next_dur)) = &diag {
-            info!(
-                "GAPLESS-DIAG mpv[pos={:?} count={:?} dur={:.0}s time={:.0}s] queue[pos={:?} now='{}' next='{}' next_dur={}s]",
-                mpos, mcount, mdur, mtime, cur, now, next_title, next_dur
-            );
-        }
         let Some(next_pos) = next_pos else {
             return GaplessOutcome::QueueRanOut;
         };
@@ -255,9 +215,6 @@ impl DaemonCore {
         self.preload_next_track(next_pos).await;
         self.emit_now_playing().await;
         self.emit_queue().await;
-        // Re-clock near the boundary: a gapless jump across sample rates
-        // must re-pin instead of riding the 500ms backstop tick.
-        self.spawn_fast_probe();
         GaplessOutcome::Advanced
     }
 
@@ -347,43 +304,6 @@ impl DaemonCore {
         }
     }
 
-    /// Fire a desktop notification once per track change while Playing, off the
-    /// tick so the cover-art fetch never blocks playback. No-op when the
-    /// notifications config is off or no session bus is reachable.
-    async fn tick_desktop_notification(self: &Arc<Self>) {
-        use crate::daemon::state::PlaybackState;
-        let (enabled, song) = {
-            let s = self.state.read().await;
-            if s.now_playing.state != PlaybackState::Playing {
-                return;
-            }
-            (s.config.notifications, s.now_playing.song.clone())
-        };
-        let Some(song) = song.filter(|_| enabled) else {
-            return;
-        };
-        if !self.notifier.mark_if_changed(&song.id) {
-            return;
-        }
-        let core = self.clone();
-        tokio::spawn(async move {
-            if core.shutdown.load(std::sync::atomic::Ordering::Acquire) {
-                return;
-            }
-            let cover = match song.cover_id() {
-                Some(cid) => {
-                    let bytes = core.get_cover_art(&cid, 512).await;
-                    (!bytes.is_empty()).then_some(bytes)
-                }
-                None => None,
-            };
-            let body = crate::daemon::notify::track_body(&song);
-            core.notifier
-                .show(&song.title, &body, cover.as_deref())
-                .await;
-        });
-    }
-
     /// Fetch sample-rate + bit-depth + format + channels if not yet known. Backstop poll.
     async fn tick_fetch_audio_properties_if_needed(self: &Arc<Self>) {
         let need_sr = self.state.read().await.now_playing.sample_rate.is_none();
@@ -400,7 +320,6 @@ impl DaemonCore {
         // Runs every tick, including Skip/Stop, so a stop or end-of-queue still
         // finalizes the played track (the modern path reports "stopped" there).
         self.scrobble_tick().await;
-        self.tick_desktop_notification().await;
         if matches!(cont, TickContinuation::Stop) {
             return;
         }

@@ -185,8 +185,6 @@ pub struct SettingsState {
     pub cover_art_size: u8,
     /// Report plays to the server (scrobble / playbackReport).
     pub scrobble: bool,
-    /// Show a desktop notification on track change.
-    pub notifications: bool,
 }
 
 impl Default for SettingsState {
@@ -203,7 +201,6 @@ impl Default for SettingsState {
             cover_art: false,
             cover_art_size: 16,
             scrobble: true,
-            notifications: true,
         }
     }
 }

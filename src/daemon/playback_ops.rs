@@ -25,12 +25,7 @@ impl DaemonCore {
         }
     }
 
-    /// Pause playback. Stops mpv so it disconnects its PipeWire stream and
-    /// releases the force-rate pin, so the audio device follows other apps
-    /// (e.g. a browser) while paused. The playhead is kept in
-    /// `now_playing.position`; resume re-pins the known rate then reloads and
-    /// seeks back. Commits `Paused` before the stop so the idle tick (gated on
-    /// `is_playing`) cannot read the stop as a track-end and auto-advance.
+    /// Pause playback. Stops mpv so it disconnects its PipeWire stream and the audio device can re-rate to other apps; the playhead is kept in `now_playing.position` and resume reloads + seeks back. Commits `Paused` before the stop so the idle tick (gated on `is_playing`) cannot read the stop as a track-end and auto-advance.
     pub async fn pause_playback(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
         let was_playing = {
@@ -56,17 +51,15 @@ impl DaemonCore {
         Ok(())
     }
 
-    /// Resume from pause by reloading the current track and seeking back to the saved position (mpv was stopped on pause to free the audio device). Before audio, compares the device's current rate to the track's known rate; if they differ it switches and waits the settle delay so the re-clock finishes in silence, never in the music. From `Stopped` with a queued position, starts that track from the top.
+    /// Resume from pause by reloading the current track and seeking back to the saved position (mpv was stopped on pause to free the audio device), which re-pins the rate via the normal play path. From `Stopped` with a queued position, starts that track from the top.
     pub async fn resume_playback(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
-        let (playback_state, queue_pos, resume_at, known_rate, settle_ms) = {
+        let (playback_state, queue_pos, resume_at) = {
             let state = self.state.read().await;
             (
                 state.now_playing.state,
                 state.queue_position,
                 state.now_playing.position,
-                state.now_playing.sample_rate,
-                state.config.rate_switch_delay_ms,
             )
         };
         if playback_state != PlaybackState::Paused && playback_state != PlaybackState::Stopped {
@@ -80,27 +73,6 @@ impl DaemonCore {
         } else {
             0.0
         };
-        // Pause released the pin: if the device no longer matches the track's
-        // rate, switch and wait the settle so the re-clock lands in silence.
-        if playback_state == PlaybackState::Paused {
-            if let Some(rate) = known_rate {
-                let switched = {
-                    let mut pw = self.pipewire.lock().await;
-                    if pw.get_current_rate() == Some(rate) {
-                        false
-                    } else {
-                        if let Err(e) = pw.set_rate(rate).await {
-                            warn!("Failed to re-pin rate on resume: {}", e);
-                        }
-                        true
-                    }
-                };
-                if switched {
-                    tokio::time::sleep(std::time::Duration::from_millis(u64::from(settle_ms)))
-                        .await;
-                }
-            }
-        }
         self.play_queue_position_at(pos, PlayMode::Direct, start_at)
             .await?;
         Ok(())
@@ -254,12 +226,12 @@ impl DaemonCore {
         }
         self.emit_now_playing().await;
         self.emit_queue().await;
+        self.spawn_fast_probe();
         Ok(())
     }
 
     /// Repeat-aware: loads current for One, wraps for All, no-ops at the end for Off.
     pub async fn preload_next_track(self: &Arc<Self>, current_pos: usize) {
-        let gen = self.loadfile_gen.load(std::sync::atomic::Ordering::Acquire);
         let next_song = {
             let state = self.state.read().await;
             let queue_len = state.queue.len();
@@ -280,17 +252,8 @@ impl DaemonCore {
             }
         };
 
-        info!(
-            "PRELOAD-DIAG: from pos {} -> '{}'",
-            current_pos, next_song.title
-        );
+        debug!("Pre-loading next track for gapless: {}", next_song.title);
         let mut mpv = self.mpv.lock().await;
-        // A newer loadfile (concurrent play or a tick advance) superseded this
-        // preload's current track; skip so a stale next never lands in slot 1.
-        if self.loadfile_gen.load(std::sync::atomic::Ordering::Acquire) != gen {
-            debug!("preload superseded by a newer load; skipping append");
-            return;
-        }
         if let Err(e) = mpv.loadfile_append(&url).await {
             debug!("Failed to pre-load next track: {}", e);
         } else if let Ok(count) = mpv.get_playlist_count().await {

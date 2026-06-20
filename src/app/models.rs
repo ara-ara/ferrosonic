@@ -9,4 +9,6 @@ pub enum SongOption {
     Starred,
     /// Random songs list.
     Random,
+    /// Random albums list
+    RandomAlbums,
 }

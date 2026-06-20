@@ -67,14 +67,39 @@ impl DaemonCore {
         }
     }
 
+    /// Re-fetch the random-albums batch and broadcast the new list.
+    pub async fn refresh_random_albums(self: &Arc<Self>) {
+        let Some(client) = self.subsonic.read().await.clone() else {
+            return;
+        };
+        let gen_at_start = self.config_gen.load(std::sync::atomic::Ordering::Acquire);
+        match client.get_random_albums().await {
+            Ok(songs) => {
+                if self.config_gen_changed(gen_at_start) {
+                    debug!("refresh_random_albums: config changed mid-request, discarding");
+                    return;
+                }
+                let mut state = self.state.write().await;
+                state.library.random_songs = songs.clone();
+                drop(state);
+                self.emit(DaemonEvent::RandomChanged(songs));
+                self.bump_library_version();
+            }
+            Err(e) => {
+                error!("Failed to load random albums: {}", e);
+                self.emit(DaemonEvent::Notification {
+                    message: format!("Failed to load random albums: {}", e),
+                    is_error: true,
+                });
+            }
+        }
+    }
+
     /// Re-fetch the artist index and broadcast the new list.
     pub async fn refresh_artists(self: &Arc<Self>) {
         let Some(client) = self.subsonic.read().await.clone() else {
             return;
         };
-        // Drop cached cover art so a refresh (or startup) re-pulls art that
-        // changed on the server.
-        self.clear_cover_cache().await;
         let gen_at_start = self.config_gen.load(std::sync::atomic::Ordering::Acquire);
         match client.get_artists().await {
             Ok(artists) => {

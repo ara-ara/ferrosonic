@@ -313,7 +313,7 @@ impl App {
                 ds.now_playing
                     .song
                     .as_ref()
-                    .and_then(crate::subsonic::models::Child::cover_id),
+                    .and_then(|s| s.cover_art.clone()),
                 cs.settings_state.cover_art,
             )
         };

@@ -15,10 +15,9 @@ enum SettingChange {
     AutoContinue,
     Scrobble,
     Daemon,
-    Notifications,
 }
 
-const SETTINGS_FIELD_COUNT: usize = 10;
+const SETTINGS_FIELD_COUNT: usize = 9;
 
 impl App {
     pub(super) async fn handle_settings_key(&mut self, key: event::KeyEvent) -> Result<(), Error> {
@@ -69,7 +68,6 @@ impl App {
             auto_continue,
             scrobble,
             daemon_enabled,
-            notifications,
             gradient,
             h_gradient,
         ) = {
@@ -90,7 +88,6 @@ impl App {
                 s.auto_continue,
                 s.scrobble,
                 s.daemon_enabled,
-                s.notifications,
                 s.current_theme().cava_gradient.clone(),
                 s.current_theme().cava_horizontal_gradient.clone(),
             )
@@ -105,7 +102,6 @@ impl App {
             SettingChange::AutoContinue => DaemonRequest::SetAutoContinue(auto_continue),
             SettingChange::Scrobble => DaemonRequest::SetScrobble(scrobble),
             SettingChange::Daemon => DaemonRequest::SetDaemonEnabled(daemon_enabled),
-            SettingChange::Notifications => DaemonRequest::SetNotifications(notifications),
         };
         if let Err(e) = self.client.request(req).await {
             let ds = self.daemon_state.read().await;
@@ -146,8 +142,7 @@ impl App {
             | SettingChange::Repeat
             | SettingChange::AutoContinue
             | SettingChange::Scrobble
-            | SettingChange::Daemon
-            | SettingChange::Notifications => {}
+            | SettingChange::Daemon => {}
         }
 
         Ok(())
@@ -226,10 +221,6 @@ fn adjust_setting(
             s.daemon_enabled = !s.daemon_enabled;
             Some(SettingChange::Daemon)
         }
-        9 => {
-            s.notifications = !s.notifications;
-            Some(SettingChange::Notifications)
-        }
         _ => None,
     }
 }
@@ -245,7 +236,6 @@ fn change_message(s: &crate::app::state::SettingsState, change: SettingChange) -
         SettingChange::AutoContinue => format!("Auto-continue: {}", on_off(s.auto_continue)),
         SettingChange::Scrobble => format!("Scrobble: {}", on_off(s.scrobble)),
         SettingChange::Daemon => format!("Daemon: {} (restart to apply)", on_off(s.daemon_enabled)),
-        SettingChange::Notifications => format!("Notifications: {}", on_off(s.notifications)),
     }
 }
 

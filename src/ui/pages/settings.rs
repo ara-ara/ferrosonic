@@ -67,7 +67,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
     let auto_val = if s.auto_continue { "On" } else { "Off" }.to_string();
     let scrobble_val = if s.scrobble { "On" } else { "Off" }.to_string();
     let daemon_val = if s.daemon_enabled { "On" } else { "Off" }.to_string();
-    let notifications_val = if s.notifications { "On" } else { "Off" }.to_string();
 
     let x = inner.x;
     let w = inner.width;
@@ -127,11 +126,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
             value: daemon_val,
             idx: 8,
         },
-        Item::Row {
-            label: "Notifications",
-            value: notifications_val,
-            idx: 9,
-        },
     ];
 
     {
@@ -167,19 +161,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
         }
     }
 
-    let help_text = settings_help_text(sel, cava_ok);
-    let help_y = inner.y + inner.height.saturating_sub(1);
-    let help = Paragraph::new(help_text).style(Style::default().fg(colors.muted));
-    help.render(
-        Rect::new(inner.x, help_y, inner.width, 1),
-        frame.buffer_mut(),
-    );
-}
-
-/// Help-line text for the selected settings field. Indices MUST track the
-/// `Item::Row { idx }` order in `render`: 7 Scrobble, 8 Daemon, 9 Notifications.
-fn settings_help_text(sel: usize, cava_ok: bool) -> &'static str {
-    match sel {
+    let help_text = match sel {
         0 => "← → or Enter to change theme (auto-saves)",
         1 if cava_ok => "← → or Enter to toggle cava visualizer (auto-saves)",
         1 => "cava is not installed on this system",
@@ -189,11 +171,15 @@ fn settings_help_text(sel: usize, cava_ok: bool) -> &'static str {
         4 => "← → to adjust now-playing height when art is visible (8-24 rows, step 2)",
         5 => "← → or Enter to cycle repeat mode (off / one / all)",
         6 => "← → or Enter to toggle auto-continue (random songs when queue ends)",
-        7 => "← → or Enter to toggle scrobbling (report plays to the server)",
-        8 => "← → or Enter to toggle background daemon (takes effect on next launch)",
-        9 => "← → or Enter to toggle desktop notifications on track change",
+        7 => "← → or Enter to toggle background daemon (takes effect on next launch)",
         _ => "",
-    }
+    };
+    let help_y = inner.y + inner.height.saturating_sub(1);
+    let help = Paragraph::new(help_text).style(Style::default().fg(colors.muted));
+    help.render(
+        Rect::new(inner.x, help_y, inner.width, 1),
+        frame.buffer_mut(),
+    );
 }
 
 fn section_heading(buf: &mut Buffer, area: Rect, label: &str, colors: &ThemeColors) {
@@ -248,41 +234,4 @@ fn setting_row(
         arrows,
     ]);
     Paragraph::new(line).render(area, buf);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::settings_help_text;
-
-    #[test]
-    fn help_text_tracks_each_field_index() {
-        assert!(
-            settings_help_text(6, true).contains("auto-continue"),
-            "idx 6 is Auto-continue"
-        );
-        assert!(
-            settings_help_text(7, true).contains("scrobbling"),
-            "idx 7 is Scrobble, not the daemon row"
-        );
-        assert!(
-            settings_help_text(8, true).contains("daemon"),
-            "idx 8 is Daemon"
-        );
-        assert!(
-            settings_help_text(9, true).contains("notifications"),
-            "idx 9 is Desktop Notifications"
-        );
-        assert_eq!(
-            settings_help_text(10, true),
-            "",
-            "no field beyond Notifications"
-        );
-    }
-
-    #[test]
-    fn help_text_gates_cava_rows_on_availability() {
-        assert!(settings_help_text(1, true).contains("cava visualizer"));
-        assert!(settings_help_text(1, false).contains("not installed"));
-        assert!(settings_help_text(2, false).contains("not installed"));
-    }
 }

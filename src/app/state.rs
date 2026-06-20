@@ -143,7 +143,7 @@ impl<'a> AppState<'a> {
     /// Song list backing the Quick Play page's active selection.
     pub fn songs_list(&self) -> &[Child] {
         match self.client.songs.selected_option {
-            Some(SongOption::Random) => &self.daemon.library.random_songs,
+            Some(SongOption::Random) | Some(SongOption::RandomAlbums) => &self.daemon.library.random_songs,
             _ => &self.daemon.library.starred_songs,
         }
     }
@@ -186,7 +186,6 @@ pub fn new_shared_client_state(config: &Config) -> SharedClientState {
     client.settings_state.cover_art = config.cover_art;
     client.settings_state.cover_art_size = config.cover_art_size.clamp(8, 24);
     client.settings_state.scrobble = config.scrobble;
-    client.settings_state.notifications = config.notifications;
     client.songs.selected_option = Some(SongOption::Starred);
     Arc::new(RwLock::new(client))
 }
