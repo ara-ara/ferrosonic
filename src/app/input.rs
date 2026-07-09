@@ -2,11 +2,14 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest, Page};
 
 impl App {
     /// Handle terminal events. Pub for integration tests; production
     /// callers use `App::run`.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the daemon request fails.
     pub async fn handle_event(&mut self, event: Event) -> Result<(), Error> {
         match event {
             Event::Key(key) => {
@@ -26,7 +29,7 @@ impl App {
                         (
                             td.cava_gradient.clone(),
                             td.cava_horizontal_gradient.clone(),
-                            cs.settings_state.cava_size as u32,
+                            u32::from(cs.settings_state.cava_size),
                         )
                     };
                     self.start_cava(&g, &h, cava_h);
@@ -40,6 +43,13 @@ impl App {
     }
 
     /// Route one key event to the active page handler.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the daemon request fails.
+    // Cohesive single match/render; splitting would fragment one logical unit.
+    #[allow(clippy::too_many_lines)]
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn handle_key(&mut self, key: event::KeyEvent) -> Result<(), Error> {
         let ds = self.daemon_state.read().await;
         let mut cs = self.client_state.write().await;
@@ -53,16 +63,16 @@ impl App {
         // Quit-confirm prompt: while it is up, only y/n/esc do anything.
         if state.client.quit_prompt {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Char('y' | 'Y') => {
                     state.client.quit_prompt = false;
                     state.client.should_quit = true;
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     let _ = self.client.request(DaemonRequest::Shutdown).await;
                     return Ok(());
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
+                KeyCode::Char('n' | 'N') => {
                     state.client.quit_prompt = false;
                     state.client.should_quit = true;
                     return Ok(());
@@ -73,6 +83,14 @@ impl App {
                 }
                 _ => return Ok(()),
             }
+        }
+
+        // Add-to-playlist picker: while open, the overlay owns every key.
+        if state.client.playlist_picker.active {
+            let _ = state;
+            drop(cs);
+            drop(ds);
+            return self.handle_playlist_picker_key(key).await;
         }
 
         // F-keys switch pages while typing; unsaved edits revert.
@@ -92,6 +110,11 @@ impl App {
                 state.client.queue_state.naming_playlist = false;
                 state.client.queue_state.playlist_name.clear();
             }
+            if state.client.page == Page::Playlists {
+                state.client.playlists.renaming = false;
+                state.client.playlists.rename_buf.clear();
+                state.client.playlists.confirming_delete = false;
+            }
         } else {
             let is_server_text_field =
                 state.client.page == Page::Server && state.client.server_state.selected_field <= 2;
@@ -99,16 +122,19 @@ impl App {
                 state.client.page == Page::Library && state.client.artists.filter_active;
             let is_naming_playlist =
                 state.client.page == Page::Queue && state.client.queue_state.naming_playlist;
+            let is_editing_playlist = state.client.page == Page::Playlists
+                && (state.client.playlists.renaming || state.client.playlists.confirming_delete);
 
-            if is_server_text_field || is_filtering || is_naming_playlist {
+            if is_server_text_field || is_filtering || is_naming_playlist || is_editing_playlist {
                 let page = state.client.page;
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 return match page {
                     Page::Server => self.handle_server_key(key).await,
                     Page::Library => self.handle_library_key(key).await,
                     Page::Queue => self.handle_queue_key(key).await,
+                    Page::Playlists => self.handle_playlists_key(key).await,
                     _ => Ok(()),
                 };
             }
@@ -154,8 +180,8 @@ impl App {
                 state.client.page = Page::Settings;
                 return Ok(());
             }
-            (KeyCode::Char('p'), KeyModifiers::NONE) | (KeyCode::Char(' '), KeyModifiers::NONE) => {
-                drop(state);
+            (KeyCode::Char('p' | ' '), KeyModifiers::NONE) => {
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 return self
@@ -166,7 +192,7 @@ impl App {
                     .map_err(Error::from);
             }
             (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 return self
@@ -177,7 +203,7 @@ impl App {
                     .map_err(Error::from);
             }
             (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 return self
@@ -189,7 +215,7 @@ impl App {
             }
             (KeyCode::Char('n'), KeyModifiers::NONE) => {
                 let song_id = state.daemon.now_playing.song.as_ref().map(|s| s.id.clone());
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 if let Some(id) = song_id {
@@ -199,7 +225,7 @@ impl App {
             }
             (KeyCode::Char('T'), _) => {
                 state.client.notify("Shuffling library...");
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 let _ = self.client.request(DaemonRequest::ShuffleLibrary).await;
@@ -209,7 +235,7 @@ impl App {
                 let new_mode = state.client.settings_state.repeat_mode.cycle();
                 state.client.settings_state.repeat_mode = new_mode;
                 state.client.notify(format!("Repeat: {}", new_mode.label()));
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 let _ = self
@@ -220,7 +246,7 @@ impl App {
             }
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
                 state.client.notify("Refreshing...");
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 self.load_initial_data().await;
@@ -237,7 +263,7 @@ impl App {
         }
 
         let page = state.client.page;
-        drop(state);
+        let _ = state;
         drop(cs);
         drop(ds);
         match page {

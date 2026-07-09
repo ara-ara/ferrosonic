@@ -106,15 +106,15 @@ fn hex_to_color(hex: &str) -> Color {
 fn parse_gradient(values: &[String], fallback: &[&str; 8]) -> [String; 8] {
     let mut result: [String; 8] = std::array::from_fn(|i| fallback[i].to_string());
     for (i, v) in values.iter().enumerate().take(8) {
-        result[i] = v.clone();
+        result[i].clone_from(v);
     }
     result
 }
 
 impl ThemeData {
     fn from_file_content(name: &str, content: &str) -> Result<Self, String> {
-        let file: ThemeFile = toml::from_str(content)
-            .map_err(|e| format!("Failed to parse theme '{}': {}", name, e))?;
+        let file: ThemeFile =
+            toml::from_str(content).map_err(|e| format!("Failed to parse theme '{name}': {e}"))?;
 
         let c = &file.colors;
         let colors = ThemeColors {
@@ -143,16 +143,18 @@ impl ThemeData {
         ];
 
         let cava = file.cava.as_ref();
-        let cava_gradient = match cava.and_then(|c| c.gradient.as_ref()) {
-            Some(g) => parse_gradient(g, &default_g),
-            None => std::array::from_fn(|i| default_g[i].to_string()),
-        };
-        let cava_horizontal_gradient = match cava.and_then(|c| c.horizontal_gradient.as_ref()) {
-            Some(h) => parse_gradient(h, &default_h),
-            None => std::array::from_fn(|i| default_h[i].to_string()),
-        };
+        let cava_gradient = cava.and_then(|c| c.gradient.as_ref()).map_or_else(
+            || std::array::from_fn(|i| default_g[i].to_string()),
+            |g| parse_gradient(g, &default_g),
+        );
+        let cava_horizontal_gradient = cava
+            .and_then(|c| c.horizontal_gradient.as_ref())
+            .map_or_else(
+                || std::array::from_fn(|i| default_h[i].to_string()),
+                |h| parse_gradient(h, &default_h),
+            );
 
-        Ok(ThemeData {
+        Ok(Self {
             name: name.to_string(),
             colors,
             cava_gradient,
@@ -161,8 +163,9 @@ impl ThemeData {
     }
 
     /// The built-in fallback theme.
+    #[must_use]
     pub fn default_theme() -> Self {
-        ThemeData {
+        Self {
             name: "Default".to_string(),
             colors: ThemeColors {
                 primary: Color::Cyan,
@@ -214,10 +217,10 @@ pub fn load_themes() -> Vec<ThemeData> {
             let mut entries: Vec<_> = std::fs::read_dir(&dir)
                 .into_iter()
                 .flatten()
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
                 .collect();
-            entries.sort_by_key(|e| e.file_name());
+            entries.sort_by_key(std::fs::DirEntry::file_name);
 
             for entry in entries {
                 let path = entry.path();
@@ -245,6 +248,8 @@ pub fn load_themes() -> Vec<ThemeData> {
 }
 
 /// `tokyo-night` → `Tokyo Night`, `rose_pine` → `Rose Pine`.
+// The Some arm depends on iterator state from chars.next(); match keeps the borrow flow clear.
+#[allow(clippy::option_if_let_else)]
 fn titlecase_filename(s: &str) -> String {
     s.split(['-', '_'])
         .filter(|w| !w.is_empty())
@@ -272,10 +277,11 @@ pub fn seed_default_themes(dir: &Path) {
     for (filename, content) in BUILTIN_THEMES {
         let path = dir.join(filename);
         if !path.exists() {
-            let res = std::fs::write(&path, content);
-            match res {
-                Err(e) => error!("Failed to write theme {}: {}", filename, e),
-                Ok(()) => info!("Seeded theme file: {}", filename),
+            let res = crate::io_util::atomic_write_bytes(&path, content.as_bytes());
+            if let Err(e) = res {
+                error!("Failed to write theme {}: {}", filename, e);
+            } else {
+                info!("Seeded theme file: {}", filename);
             }
         }
     }

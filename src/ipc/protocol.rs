@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Config, RepeatMode};
 use crate::daemon::state::{DaemonState, NowPlaying};
 use crate::secret::{deserialize_secret, serialize_revealed, Secret};
-use crate::subsonic::models::{Album, Artist, Child, Playlist, SearchResult3};
+use crate::subsonic::models::{Album, Artist, Child, MusicFolder, Playlist, SearchResult3};
 
 /// Client-to-daemon command sent over the IPC socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +73,39 @@ pub enum DaemonRequest {
         /// Song IDs in queue order.
         song_ids: Vec<String>,
     },
+    /// Rename a server-side playlist.
+    RenamePlaylist {
+        /// ID of the playlist to rename.
+        id: String,
+        /// New playlist name.
+        name: String,
+    },
+    /// Delete a server-side playlist.
+    DeletePlaylist {
+        /// ID of the playlist to delete.
+        id: String,
+    },
+    /// Append a song to the end of a server-side playlist.
+    AddSongToPlaylist {
+        /// ID of the target playlist.
+        playlist_id: String,
+        /// ID of the song to add.
+        song_id: String,
+    },
+    /// Remove the song at this index from a server-side playlist.
+    RemovePlaylistSong {
+        /// ID of the target playlist.
+        playlist_id: String,
+        /// Zero-based index of the song to remove.
+        index: usize,
+    },
+    /// Replace a playlist's songs with this exact ordered list (reorder).
+    ReorderPlaylist {
+        /// ID of the target playlist.
+        playlist_id: String,
+        /// Song IDs in the desired order.
+        song_ids: Vec<String>,
+    },
     /// Star or unstar the song with this ID.
     ToggleStarSong(String),
     /// Fetch the albums of the artist with this ID.
@@ -133,6 +166,10 @@ pub enum DaemonRequest {
     SetAutoContinue(bool),
     /// Enable or disable reporting plays to the server (scrobbling).
     SetScrobble(bool),
+    /// Enable or disable desktop notifications on track change.
+    SetNotifications(bool),
+    /// Select the library to browse (`None` = all libraries).
+    SetMusicFolder(Option<i64>),
     /// Set the repeat mode and persist the choice.
     SetRepeatMode(RepeatMode),
     /// Enable or disable cover art rendering.
@@ -171,6 +208,20 @@ pub enum EnqueueMode {
     InsertAfter(usize),
 }
 
+/// Where a saved password was persisted, reported back so the TUI can tell
+/// the user whether their credential reached the OS keychain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PasswordStorage {
+    /// Stored in the OS keychain (Secret Service / macOS Keychain).
+    Keyring,
+    /// Written to the configured `PasswordFile`.
+    PasswordFile,
+    /// Provided by the configured `PasswordEval` command; not persisted here.
+    PasswordEval,
+    /// No keychain available; written inline to the owner-only config file.
+    Inline,
+}
+
 /// Daemon-to-client reply to a single `DaemonRequest`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonResponse {
@@ -178,6 +229,8 @@ pub enum DaemonResponse {
     Ok,
     /// Request failed; the message is human-readable.
     Err(String),
+    /// `UpdateServerConfig` succeeded; reports where the password was stored.
+    ServerConfigSaved(PasswordStorage),
     /// Albums of a requested artist.
     ArtistAlbums(Vec<Album>),
     /// The entire album library for the flat album-list view.
@@ -218,7 +271,7 @@ pub enum DaemonEvent {
     },
     /// Song / playback state / sample rate change. Position-only ticks
     /// use `PositionTick` to avoid event spam.
-    NowPlayingChanged(NowPlaying),
+    NowPlayingChanged(Box<NowPlaying>),
     /// Playback position update in seconds.
     PositionTick(f64),
     /// New starred-songs list.
@@ -250,6 +303,8 @@ pub enum DaemonEvent {
     },
     /// New playlist list.
     PlaylistsChanged(Vec<Playlist>),
+    /// New music-folder (library) list.
+    MusicFoldersChanged(Vec<MusicFolder>),
     /// Song list of one playlist changed.
     PlaylistSongsChanged {
         /// ID of the affected playlist.
@@ -270,7 +325,7 @@ pub enum DaemonEvent {
     ConfigChanged(Config),
     /// Daemon is shutting down; subscribers should disconnect.
     Shutdown,
-    /// Opt-in pull-style alternative to the bulk ArtistsChanged etc events.
+    /// Opt-in pull-style alternative to the bulk `ArtistsChanged` etc events.
     LibraryVersionChanged(u64),
 }
 

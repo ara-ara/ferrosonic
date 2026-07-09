@@ -1,4 +1,4 @@
-//! libchafa FFI loader; high-quality knobs ratatui-image's bundled wrapper doesn't expose. L60_FILE exempt: FFI-runtime branches require libchafa installed.
+//! libchafa FFI loader; high-quality knobs ratatui-image's bundled wrapper doesn't expose. `L60_FILE` exempt: FFI-runtime branches require libchafa installed.
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -13,7 +13,7 @@ type ChafaCanvas = *mut c_void;
 
 // Symbol-tag mask. `CHAFA_SYMBOL_TAG_ALL` from chafa.h:
 // ~(EXTRA | BAD | UGLY) ≈ every symbol set chafa knows about.
-const CHAFA_SYMBOL_TAG_ALL: u32 = 0xBFE7FFFF;
+const CHAFA_SYMBOL_TAG_ALL: u32 = 0xBFE7_FFFF;
 
 // CHAFA_PIXEL_RGB8 enum value.
 const CHAFA_PIXEL_RGB8: u32 = 8;
@@ -177,10 +177,11 @@ pub struct EncodedCell {
     pub bg: Color,
 }
 
-/// Encode an image into `width × height` truecolor cells with high
-/// quality settings (Floyd-Steinberg dither, work factor 1.0, every
-/// symbol set chafa supports). Returns `None` if libchafa isn't
-/// available or the canvas allocation fails.
+/// Encode an image into `width × height` truecolor cells.
+///
+/// Uses high quality settings (Floyd-Steinberg dither, work factor 1.0, every
+/// symbol set chafa supports). Returns `None` if libchafa isn't available or
+/// the canvas allocation fails.
 pub fn encode(img: &DynamicImage, width: u16, height: u16) -> Option<Vec<EncodedCell>> {
     if width == 0 || height == 0 {
         return None;
@@ -193,7 +194,7 @@ pub fn encode(img: &DynamicImage, width: u16, height: u16) -> Option<Vec<Encoded
             return None;
         }
         (chafa.canvas_config_set_symbol_map)(config, chafa.symbol_map);
-        (chafa.canvas_config_set_geometry)(config, width as i32, height as i32);
+        (chafa.canvas_config_set_geometry)(config, i32::from(width), i32::from(height));
         if let Some(f) = chafa.canvas_config_set_canvas_mode {
             f(config, CHAFA_CANVAS_MODE_TRUECOLOR);
         }
@@ -219,19 +220,25 @@ pub fn encode(img: &DynamicImage, width: u16, height: u16) -> Option<Vec<Encoded
             canvas,
             CHAFA_PIXEL_RGB8,
             rgb.as_ptr(),
-            w as i32,
-            h as i32,
-            (w * 3) as i32,
+            crate::num::i32_sat(w),
+            crate::num::i32_sat(h),
+            crate::num::i32_sat(w * 3),
         );
 
         let mut cells = Vec::with_capacity((width as usize) * (height as usize));
         for y in 0..height {
             for x in 0..width {
-                let c = (chafa.canvas_get_char_at)(canvas, x as i32, y as i32);
+                let c = (chafa.canvas_get_char_at)(canvas, i32::from(x), i32::from(y));
                 let ch = char::from_u32(c).unwrap_or(' ');
                 let mut fg: i32 = 0;
                 let mut bg: i32 = 0;
-                (chafa.canvas_get_colors_at)(canvas, x as i32, y as i32, &mut fg, &mut bg);
+                (chafa.canvas_get_colors_at)(
+                    canvas,
+                    i32::from(x),
+                    i32::from(y),
+                    &raw mut fg,
+                    &raw mut bg,
+                );
                 cells.push(EncodedCell {
                     ch,
                     fg: argb_to_color(fg),
@@ -247,7 +254,9 @@ pub fn encode(img: &DynamicImage, width: u16, height: u16) -> Option<Vec<Encoded
     }
 }
 
-fn argb_to_color(c: i32) -> Color {
+// Bytes masked to 0xff (0..=255); try_from is not const-stable, so `as u8` is exact here.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+const fn argb_to_color(c: i32) -> Color {
     Color::Rgb(
         ((c >> 16) & 0xff) as u8,
         ((c >> 8) & 0xff) as u8,

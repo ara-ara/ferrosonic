@@ -5,12 +5,16 @@ use tracing::info;
 
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest};
 
 const MAX_FIELD_LEN: usize = 1024;
 
 impl App {
-    pub(super) async fn handle_server_key(&mut self, key: event::KeyEvent) -> Result<(), Error> {
+    // Cohesive single match/render; splitting would fragment one logical unit.
+    #[allow(clippy::too_many_lines)]
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) async fn handle_server_key(&self, key: event::KeyEvent) -> Result<(), Error> {
         let ds = self.daemon_state.read().await;
         let mut cs = self.client_state.write().await;
         let state = AppState {
@@ -77,7 +81,7 @@ impl App {
                         }
                         state.client.server_state.status =
                             Some("Testing connection...".to_string());
-                        drop(state);
+                        let _ = state;
                         drop(cs);
                         drop(ds);
 
@@ -123,8 +127,7 @@ impl App {
                                     daemon: &ds,
                                     client: &mut cs,
                                 };
-                                state.client.server_state.status =
-                                    Some(format!("IPC error: {}", e));
+                                state.client.server_state.status = Some(format!("IPC error: {e}"));
                             }
                         }
                         return Ok(());
@@ -144,7 +147,7 @@ impl App {
                             return Ok(());
                         }
                         state.client.server_state.status = Some("Saving...".to_string());
-                        drop(state);
+                        let _ = state;
                         drop(cs);
                         drop(ds);
 
@@ -157,7 +160,7 @@ impl App {
                             })
                             .await
                         {
-                            Ok(_) => {
+                            Ok(resp) => {
                                 info!("Config saved and refetched");
                                 let ds = self.daemon_state.read().await;
                                 let mut cs = self.client_state.write().await;
@@ -165,8 +168,7 @@ impl App {
                                     daemon: &ds,
                                     client: &mut cs,
                                 };
-                                state.client.server_state.status =
-                                    Some("Connected and loaded data!".to_string());
+                                state.client.server_state.status = Some(server_save_status(&resp));
                             }
                             Err(e) => {
                                 info!("Config save failed: {}", e);
@@ -177,7 +179,7 @@ impl App {
                                     client: &mut cs,
                                 };
                                 state.client.server_state.status =
-                                    Some(format!("Save failed: {}", e));
+                                    Some(format!("Save failed: {e}"));
                             }
                         }
                         return Ok(());
@@ -189,5 +191,27 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+/// Status line for a successful save, naming where the password was stored.
+/// Each string carries a positive keyword so the page renders it in green.
+fn server_save_status(resp: &crate::ipc::DaemonResponse) -> String {
+    use crate::ipc::{DaemonResponse, PasswordStorage};
+    match resp {
+        DaemonResponse::ServerConfigSaved(PasswordStorage::Keyring) => {
+            "Connected! Password saved to your OS keychain.".to_string()
+        }
+        DaemonResponse::ServerConfigSaved(PasswordStorage::PasswordFile) => {
+            "Connected! Password saved to your PasswordFile.".to_string()
+        }
+        DaemonResponse::ServerConfigSaved(PasswordStorage::PasswordEval) => {
+            "Connected successfully! Password supplied by your PasswordEval command.".to_string()
+        }
+        DaemonResponse::ServerConfigSaved(PasswordStorage::Inline) => {
+            "Connected! No OS keychain found; password saved to the config file (owner-only)."
+                .to_string()
+        }
+        _ => "Connected and loaded data!".to_string(),
     }
 }

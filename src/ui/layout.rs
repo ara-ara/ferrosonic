@@ -18,6 +18,8 @@ use super::{widget_cava::CavaWidget, widget_now_playing, widget_now_playing::Now
 const NOW_PLAYING_BASE: u16 = 7;
 
 /// Draw one full frame: header, page content, now-playing, footer.
+// Cohesive single match/render; splitting would fragment one logical unit.
+#[allow(clippy::too_many_lines)]
 pub fn draw(
     frame: &mut Frame<'_>,
     state: &mut AppState<'_>,
@@ -41,12 +43,12 @@ pub fn draw(
             .is_some();
 
     let now_playing_h = if art_visible {
-        (state.client.settings_state.cover_art_size as u16).clamp(8, 24)
+        u16::from(state.client.settings_state.cover_art_size).clamp(8, 24)
     } else {
         NOW_PLAYING_BASE
     };
 
-    let band_pct = state.client.settings_state.cava_size as u16;
+    let band_pct = u16::from(state.client.settings_state.cava_size);
     // Form pages draw at fixed rows; a larger floor makes the cava band
     // yield space instead of starving them into a blank page.
     let content_min = match state.client.page {
@@ -128,10 +130,7 @@ pub fn draw(
     frame.render_widget(now_playing, now_playing_area);
 
     if art_visible {
-        let cell_size = cover_art_state
-            .try_lock()
-            .map(|g| g.cell_size)
-            .unwrap_or((10, 20));
+        let cell_size = cover_art_state.try_lock().map_or((10, 20), |g| g.cell_size);
         if let Some(rect) = widget_now_playing::art_rect(now_playing_area, art_cols, cell_size) {
             cover_art::render(frame, rect, cover_art_state);
         }
@@ -145,5 +144,9 @@ pub fn draw(
 
     if state.client.quit_prompt {
         super::quit_prompt::render(frame, area, &colors);
+    }
+
+    if state.client.playlist_picker.active {
+        super::playlist_picker::render(frame, area, state, &colors);
     }
 }

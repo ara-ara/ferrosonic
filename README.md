@@ -1,34 +1,43 @@
 # Ferrosonic
 
-A terminal-based Subsonic music client written in Rust, featuring bit-perfect audio playback, gapless transitions, and full desktop integration.
+A terminal Subsonic music client written in Rust: bit-perfect audio, gapless playback, and full desktop integration.
 
-Ferrosonic is inspired by [Termsonic](https://git.sixfoisneuf.fr/termsonic/about/), the original terminal Subsonic client written in Go by [SixFoisNeuf](https://www.sixfoisneuf.fr/posts/termsonic-a-terminal-client-for-subsonic/). Ferrosonic is a ground-up rewrite in Rust with additional features including PipeWire sample rate switching for bit-perfect audio, MPRIS2 media controls, multiple color themes, and mouse support.
+It is a ground-up Rust rewrite of [Termsonic](https://git.sixfoisneuf.fr/termsonic/about/) (a Go client by [SixFoisNeuf](https://www.sixfoisneuf.fr/posts/termsonic-a-terminal-client-for-subsonic/)), adding PipeWire sample-rate switching, MPRIS2 controls, themes, and mouse support.
 
 ## Features
 
-- **Bit-perfect audio** - Automatic PipeWire sample rate switching to match the source material (44.1kHz, 48kHz, 96kHz, 192kHz, etc.)
-- **Gapless playback** - Seamless transitions between tracks with pre-buffered next track
-- **Persistent playback (optional)** - A background daemon owns the audio session so music keeps playing when you close the terminal. It is the same `ferrosonic` binary re-launched in the background, auto-spawned by the TUI; toggle off in Settings for single-process mode.
-- **MPRIS2 integration** - Full desktop media control support (play, pause, stop, next, previous, seek) with push-style `PropertiesChanged` notifications
-- **Desktop notifications** - Track-change notifications with cover art via the freedesktop.org `org.freedesktop.Notifications` interface (works under mako, dunst, GNOME, KDE); fired daemon-side so they appear even with the TUI closed
-- **Scrobbling** - Reports plays to the server (Last.fm / ListenBrainz when linked server-side) via classic `scrobble` plus the OpenSubsonic `reportPlayback` extension when the server advertises it
-- **Library page** - Tree-based artist/album browser with expandable artists and album listings
-- **Quick Play page** - Jump straight into your **Starred** songs or a **Random** roll without browsing
-- **Star songs** - Mark favourites with `n` (currently-playing) or `m` (highlighted); starred tracks show a ★ everywhere and populate the Quick Play Starred view
-- **Shuffle play** - Shuffle all songs by a selected artist or album directly from the Library page
-- **Repeat modes** - Cycle Off / One / All with `r`; the gapless pre-loader re-preloads the same track on One and wraps on All
-- **Cover art** - Display album art in the now-playing section using kitty / iTerm2 / sixel image protocols; falls back to half-blocks on plainer terminals (chafa-enhanced when the `chafa` library is installed)
-- **Playlist support** - Browse and play server playlists with shuffle capability
-- **Play queue management** - Add, remove, reorder, shuffle, and clear queue history; queue persists across daemon restarts
-- **Save queue as playlist** - Press `s` on the Queue page to create a server-side playlist from the current queue
-- **Audio quality display** - Real-time display of sample rate, bit depth, codec format, and channel layout
-- **Audio visualizer** - Integrated cava audio visualizer with theme-matched gradient colors
-- **13 built-in themes** - Default, Monokai, Dracula, Nord, Gruvbox, Catppuccin, Solarized, Tokyo Night, Rosé Pine, Everforest, Kanagawa, One Dark, and Ayu Dark
-- **Custom themes** - Create your own themes as TOML files in `~/.config/ferrosonic/themes/`
-- **Mouse support** - Clickable buttons, tabs, lists, and progress bar seeking
-- **Library search** - `/` runs a single unified server-side `search3` across artists, albums, and songs at once, results shown together in the tree
-- **Multi-disc album support** - Proper disc and track number display
-- **Keyboard-driven** - Vim-style navigation (j/k) alongside arrow keys
+### Audio
+
+- **Bit-perfect output** - PipeWire switches the system sample rate to match the source (44.1, 48, 96, 192 kHz and others) and restores it on exit.
+- **Gapless playback** - the next track is pre-buffered into mpv before the current one ends.
+- **Quality readout** - live sample rate, bit depth, codec, and channel layout.
+- **Visualizer** - built-in cava pane with theme-matched gradient colors.
+
+### Library and queue
+
+- **Tree browser** - expandable artist/album view, with a flat album-list toggle (`v`).
+- **Unified search** - `/` runs one server-side `search3` across artists, albums, and songs together.
+- **Multi-library** - on multi-folder servers, `f` scopes the tree, album list, random songs, and search to one music folder; remembered across restarts.
+- **Quick Play** - jump straight into your Starred songs or a fresh Random roll, no browsing.
+- **Stars** - favourite tracks with `n` (playing) or `m` (highlighted); shown with a star everywhere.
+- **Shuffle and repeat** - shuffle any artist, album, or the whole library; cycle repeat Off/One/All with `r`.
+- **Queue** - add, remove, reorder, shuffle, and clear history; persists across daemon restarts; save as a server playlist with `s`.
+- **Playlists** - browse, play, and fully edit server playlists (rename, delete, add/remove/reorder songs).
+- **Multi-disc albums** - correct disc and track numbering.
+
+### Desktop integration
+
+- **Persistent playback** - an optional background daemon keeps music playing after you close the terminal. [Details below](#persistent-playback).
+- **MPRIS2** - full media-key control (play, pause, stop, next, previous, seek) with push-style `PropertiesChanged` updates.
+- **Notifications** - track-change desktop notifications with cover art, fired daemon-side so they appear with the TUI closed (mako, dunst, GNOME, KDE).
+- **Scrobbling** - reports plays via classic `scrobble` plus the OpenSubsonic `reportPlayback` extension when the server advertises it (Last.fm / ListenBrainz when linked server-side).
+
+### Interface
+
+- **13 themes** - Default, Monokai, Dracula, Nord, Gruvbox, Catppuccin, Solarized, Tokyo Night, Rosé Pine, Everforest, Kanagawa, One Dark, Ayu Dark; plus custom TOML themes in `~/.config/ferrosonic/themes/`.
+- **Cover art** - kitty / iTerm2 / sixel image protocols, with a chafa-enhanced half-block fallback.
+- **Mouse support** - clickable tabs, buttons, lists, and progress-bar seeking.
+- **Keyboard-driven** - Vim-style `j`/`k` alongside arrow keys.
 
 ## Screenshots
 
@@ -42,7 +51,7 @@ Ferrosonic requires the following at runtime:
 
 | Dependency | Purpose | Required |
 |---|---|---|
-| **mpv** | Audio playback engine (via JSON IPC) | Yes |
+| **mpv** | Audio playback engine (via JSON IPC). 0.38+ recommended; older versions run a playback compatibility path (ferrosonic detects the version and warns). | Yes |
 | **PipeWire** | Automatic sample rate switching for bit-perfect audio | Recommended |
 | **WirePlumber** | PipeWire session manager | Recommended |
 | **D-Bus** | MPRIS2 desktop media controls | Recommended |
@@ -102,7 +111,7 @@ systemctl --user enable --now ferrosonicd.service
 
 ## Configuration
 
-Configuration is stored at `~/.config/ferrosonic/config.toml`. You can edit it manually or configure the server connection through the application's Server page (F5).
+Configuration is stored at `~/.config/ferrosonic/config.toml`. You can edit it manually or configure the server connection through the application's Server page (F5). When you enter your password on the Server page, ferrosonic saves it to your operating system's keychain by default and keeps it out of `config.toml`; see [Where your password is stored](#where-your-password-is-stored).
 
 ```toml
 BaseURL = "https://your-subsonic-server.com"
@@ -124,8 +133,10 @@ Notifications = true
 |---|---|
 | `BaseURL` | URL of your Subsonic-compatible server (Navidrome, Airsonic, Gonic, etc.) |
 | `Username` | Your server username |
-| `Password` | Your server password |
-| `PasswordFile` | Optional path to a file containing the password (overrides `Password`) |
+| `Password` | Your server password. Used inline only as a last resort; the Server page prefers the OS keychain. |
+| `PasswordKeyring` | Set to `true` automatically when the password lives in the OS keychain; no plaintext is then written to the config. See below. |
+| `PasswordFile` | Optional path to a file containing the password (overrides `Password` and the keychain) |
+| `PasswordEval` | Optional command whose output is the password, so no secret sits in the config. Overrides `PasswordFile`, the keychain, and `Password`; the `FERROSONIC_PASSWORD` env var still wins. See below. |
 | `Theme` | Color theme name (e.g. `Default`, `Catppuccin`, `Tokyo Night`) |
 | `Daemon` | `true` (default) auto-spawns the background daemon; `false` runs single-process |
 | `Cava` | Enable the cava visualizer pane |
@@ -138,6 +149,36 @@ Notifications = true
 | `Notifications` | Desktop track-change notifications with cover art, default `true` |
 
 Logs are written to `~/.config/ferrosonic/ferrosonic.log` (TUI) and `~/.config/ferrosonic/ferrosonicd.log` (daemon). The queue is persisted to `~/.config/ferrosonic/queue.json` so it survives daemon restarts.
+
+### Where your password is stored
+
+When you enter your password on the Server page (F5), ferrosonic stores it in your operating system's keychain (Secret Service / GNOME Keyring / KWallet on Linux, Keychain on macOS) and writes only a `PasswordKeyring = true` marker to `config.toml`, never the plaintext. Any password already sitting inline migrates to the keychain the next time you save. This is the default and needs no setup.
+
+On a machine with no usable keychain (a headless box, or no unlocked Secret Service), ferrosonic falls back to writing the password inline to `config.toml`, which is created with owner-only (`0600`) permissions, and the Server page tells you this happened. For headless or scripted setups, prefer `PasswordEval` below.
+
+At startup the password is resolved in this order, first hit wins:
+
+1. `FERROSONIC_PASSWORD` environment variable
+2. `PasswordEval` command
+3. `PasswordFile` path
+4. OS keychain (when `PasswordKeyring = true`)
+5. inline `Password`
+
+If a higher-priority source is configured but fails (command errors, file unreadable, keychain unreachable), ferrosonic clears the password and authentication fails cleanly rather than falling back to a stale credential.
+
+### Keeping the password out of the config (`PasswordEval`)
+
+`PasswordEval` runs a command and uses its first line of output as the password, so no secret is stored in `config.toml`. It works with whatever secret tooling you already use (`pass`, `gpg`, `sops`, `secret-tool`, a keyring CLI, and so on). Two forms:
+
+```toml
+# String, run via the shell (env vars, ~, and pipes work):
+PasswordEval = "pass show navidrome"
+
+# Array, executed directly with no shell (env vars and ~ still expand):
+PasswordEval = ["sops", "-d", "~/secrets/navidrome.txt"]
+```
+
+It is resolved at startup. Because the background daemon has no terminal, **the command must be non-interactive**: use an agent-backed source (`gpg-agent` or `pass` with the key already unlocked, `sops`, `secret-tool`) rather than anything that pops a passphrase prompt. The command runs with stdin closed and is killed if it does not return within 30 seconds; on any failure ferrosonic clears the password and authentication fails cleanly rather than falling back to a stale credential. The password is never passed as a command argument or environment variable, so it cannot leak through the process table.
 
 ## Keyboard Shortcuts
 
@@ -176,6 +217,8 @@ Logs are written to `~/.config/ferrosonic/ferrosonic.log` (TUI) and `~/.config/f
 | `i` | Add selected item as next in queue |
 | `t` | Shuffle play all songs by the selected artist or album |
 | `m` | Star/unstar highlighted song (songs pane focus only) |
+| `v` | Toggle the left pane between the artist tree and the flat album list |
+| `f` | Cycle the active library / music folder (All, then each folder); shown in the pane title |
 
 ### Queue Page (F2)
 
@@ -217,6 +260,15 @@ The Quick Play page has two modes selectable from the options pane: **Starred** 
 | `i` | Add selected song as next in queue |
 | `t` | Shuffle play all songs in selected playlist |
 | `m` | Star/unstar highlighted song (songs pane focus only) |
+| `R` | Rename the selected playlist (playlists pane) |
+| `D` | Delete the selected playlist, with a confirmation prompt (playlists pane) |
+| `d` | Remove the highlighted song from the playlist (songs pane) |
+| `J` / `K` | Move the highlighted song down / up to reorder (songs pane) |
+| `a` | Add the highlighted song to another playlist via a picker (songs pane) |
+
+Reordering replaces the server playlist's contents in one request, since the
+Subsonic API has no in-place move. The `a` add-to-playlist picker is also
+available from the Library, Queue, and Quick Play song panes.
 
 ### Server Page (F5)
 

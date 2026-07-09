@@ -2,15 +2,67 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-27
+
+### Fixed
+
+- **MPRIS media controls on GNOME.** The GNOME Shell media-controls widget now
+  appears and shows cover art. Two bugs were behind it: `CanPlay` was never
+  pushed via `PropertiesChanged`, so spec-compliant caching consumers (GNOME)
+  kept it `false` forever and never showed the widget; and the cover art
+  pointed at a remote authenticated Subsonic URL the widget won't load. The
+  cover is now mirrored to a local `file://`, the same way the desktop
+  notifications already do. Thanks to @semsemyonoff.
+- **PipeWire stream name.** The audio stream now identifies as "ferrosonic" in
+  the mixer (pavucontrol and similar) instead of "mpv".
+
+## [0.6.0] - 2026-06-21
+
 ### Added
+
+- **OS keychain credential storage (default).** Entering your password on the
+  Server page (F5) now stores it in the operating system's keychain (Secret
+  Service / GNOME Keyring / KWallet on Linux, Keychain on macOS) and writes
+  only a `PasswordKeyring = true` marker to `config.toml`, never the plaintext;
+  an existing inline password migrates on next save. On a machine with no
+  usable keychain (headless, no unlocked Secret Service) it falls back to an
+  inline write and the Server page says so. The Linux backend is pure-Rust
+  (zbus Secret Service), so the static release binary keeps no `libdbus` C
+  dependency. Resolution order is now
+  env > `PasswordEval` > `PasswordFile` > keychain > inline.
+
+- **`PasswordEval` config option.** Run a command and use its output as the
+  password, so no secret need sit in `config.toml`. Accepts a shell string
+  (`PasswordEval = "pass show navidrome"`) or an argv array
+  (`["sops", "-d", "~/x"]`), resolves at startup in the order
+  env > `PasswordEval` > `PasswordFile` > inline. Hardened for the headless
+  daemon: stdin closed, own session, 30s timeout with a process-group kill,
+  fatal-on-failure (never a stale fallback), output zeroized, and the secret
+  never passed via argv or env. Works across distros and macOS via `/bin/sh`.
 
 - **Desktop notifications on track change.** A freedesktop.org notification
   (any Linux daemon: mako, dunst, GNOME, KDE) with cover art, fired from the
   daemon so it shows whether or not the TUI is open. On by default; toggle
   under Settings, Notifications. Cover fetched at 512px for sharp icons.
 
+- **Library selection.** On servers with more than one music folder, press `f`
+  on the Library page to cycle the server's libraries and "All" (`getMusicFolders`).
+  Defaults to the server's first (default) library rather than all; the choice
+  scopes the artist tree, album list, random songs, and search via
+  `musicFolderId`, shows in the pane title, and is remembered across restarts.
+
+- **Playlist editing.** Rename, delete, add songs, remove songs, and reorder
+  server playlists from the Playlists page (`R` rename, `D` delete with a
+  confirm, `d` remove a song, `J`/`K` reorder). Press `a` on any highlighted
+  song (Library, Queue, Quick Play, or a playlist) to add it to a playlist via
+  a picker. Reordering rewrites the playlist in one request, since the Subsonic
+  API has no in-place move.
+
 ### Changed
 
+- **`config.toml` is now written owner-only (`0600`).** It may hold an inline
+  password in the keychain-fallback case, so the file is no longer
+  world-readable on shared machines.
 - **Resume re-clocks cleanly.** Pausing releases the audio-device rate pin so
   other apps (a browser) play at their own rate; resuming compares the device
   rate to the track's and, if they differ, switches and waits the settle
@@ -30,6 +82,22 @@
 
 ### Fixed
 
+- **Resume works on mpv older than 0.38 (issue #30).** Resume-from-pause
+  reloads the track at the saved offset using mpv's 5-argument `loadfile`
+  (`start=`), which only exists in mpv 0.38+; on older mpv the command was
+  rejected (`invalid parameter`) and playback skipped to the next track. The
+  daemon now detects the mpv version and falls back to a load-then-seek path
+  below 0.38, while keeping the precise decode-from-offset form on 0.38+. A
+  non-finite saved position can no longer emit a malformed `start=`, and the
+  Server page and daemon log advise when mpv is below 0.38.
+- **Albums show the current cover, not stale embedded art.** The now-playing
+  cover and the desktop notification now use the album cover rather than the
+  song's embedded image, which Navidrome keeps serving even after the album
+  cover is changed.
+- **Gapless no longer desyncs the queue.** A race let two preloads append the
+  same next track to mpv, leaving a duplicate that played once extra, so the
+  highlight and now-playing ran one song ahead of the audio. Preload is now
+  single-flight, guarded under the mpv lock.
 - **Streams are no longer transcoded by the server.** The stream request now
   asks for the original file (`format=raw`), so playback is bit-perfect from
   source instead of whatever format the server would transcode to by default.

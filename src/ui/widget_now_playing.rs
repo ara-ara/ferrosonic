@@ -24,7 +24,8 @@ pub struct NowPlayingWidget<'a> {
 
 impl<'a> NowPlayingWidget<'a> {
     /// Widget over the current now-playing state.
-    pub fn new(now_playing: &'a NowPlaying, colors: ThemeColors) -> Self {
+    #[must_use]
+    pub const fn new(now_playing: &'a NowPlaying, colors: ThemeColors) -> Self {
         Self {
             now_playing,
             focused: false,
@@ -34,22 +35,27 @@ impl<'a> NowPlayingWidget<'a> {
     }
 
     /// Builder: mark the pane focused for border styling.
-    pub fn focused(mut self, focused: bool) -> Self {
+    #[must_use]
+    pub const fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
         self
     }
 
     /// Builder: reserve columns on the left for cover art.
-    pub fn art_reserved_cols(mut self, cols: u16) -> Self {
+    #[must_use]
+    pub const fn art_reserved_cols(mut self, cols: u16) -> Self {
         self.art_reserved_cols = cols;
         self
     }
 }
 
-/// Largest visually-square rect that fits inside the right-half
-/// reservation, centered. `cell_size` is the pixel dimensions of one
-/// terminal cell; we choose `art_w` / `art_h` so `art_w * cell.0 ==
-/// art_h * cell.1` (rendered pixels match → square cover).
+/// Largest visually-square rect that fits inside the right-half reservation,
+/// centered.
+///
+/// `cell_size` is the pixel dimensions of one terminal cell; we choose
+/// `art_w` / `art_h` so `art_w * cell.0 == art_h * cell.1` (rendered pixels
+/// match → square cover).
+#[must_use]
 pub fn art_rect(area: Rect, cover_art_cols: u16, cell_size: (u16, u16)) -> Option<Rect> {
     if cover_art_cols == 0 || area.height < 4 || area.width < cover_art_cols + 20 {
         return None;
@@ -62,15 +68,15 @@ pub fn art_rect(area: Rect, cover_art_cols: u16, cell_size: (u16, u16)) -> Optio
     let right_w = cover_art_cols;
     let right_h = inner.height.saturating_sub(1);
 
-    let (cw, ch) = (cell_size.0.max(1) as u32, cell_size.1.max(1) as u32);
+    let (cw, ch) = (u32::from(cell_size.0.max(1)), u32::from(cell_size.1.max(1)));
     // For visually square output: art_w/art_h = ch/cw.
-    let art_h = (right_h as u32).min((right_w as u32) * cw / ch);
+    let art_h = u32::from(right_h).min(u32::from(right_w) * cw / ch);
     let art_w = art_h * ch / cw;
     if art_w == 0 || art_h == 0 {
         return None;
     }
-    let art_w = art_w as u16;
-    let art_h = art_h as u16;
+    let art_w = crate::num::u16_sat(art_w);
+    let art_h = crate::num::u16_sat(art_h);
     let pad_x = (right_w - art_w) / 2;
     let pad_y = (right_h - art_h) / 2;
     Some(Rect::new(right_x + pad_x, inner.y + pad_y, art_w, art_h))
@@ -142,21 +148,27 @@ impl Widget for NowPlayingWidget<'_> {
 fn build_quality_string(np: &NowPlaying) -> String {
     let mut parts = Vec::new();
     if let Some(ref fmt) = np.format {
-        parts.push(fmt.to_string().to_uppercase());
+        parts.push(fmt.clone().to_uppercase());
     }
     if let Some(bits) = np.bit_depth {
-        parts.push(format!("{}-bit", bits));
+        parts.push(format!("{bits}-bit"));
     }
     if let Some(rate) = np.sample_rate {
-        let khz = rate as f64 / 1000.0;
-        if khz == khz.floor() {
-            parts.push(format!("{}kHz", khz as u32));
+        let khz = f64::from(rate) / 1000.0;
+        // Exact integer-value check; floor() is exact, an epsilon compare would be wrong.
+        #[allow(clippy::float_cmp)]
+        let is_whole_khz = khz == khz.floor();
+        if is_whole_khz {
+            // f64->u32 `as` saturates; khz is a positive sample-rate/1000.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let khz_int = khz as u32;
+            parts.push(format!("{khz_int}kHz"));
         } else {
-            parts.push(format!("{:.1}kHz", khz));
+            parts.push(format!("{khz:.1}kHz"));
         }
     }
     if let Some(ref channels) = np.channels {
-        parts.push(channels.to_string());
+        parts.push(channels.clone());
     }
     parts.join(" │ ")
 }
@@ -220,10 +232,10 @@ fn render_info(
         )
     };
 
-    let n = lines.len() as u16;
+    let n = crate::num::u16_sat(lines.len());
     let pad = area.height.saturating_sub(n) / 2;
     for (i, (text, style)) in lines.iter().zip(styles.iter()).enumerate() {
-        let y = area.y + pad + i as u16;
+        let y = area.y + pad + crate::num::u16_sat(i);
         if y >= area.y + area.height {
             break;
         }
@@ -247,8 +259,8 @@ pub fn render_progress_bar(
         return;
     }
 
-    let time_str = format!("{} / {}", pos, dur);
-    let time_width = time_str.len() as u16;
+    let time_str = format!("{pos} / {dur}");
+    let time_width = crate::num::u16_sat(time_str.len());
 
     let bar_width = area.width.saturating_sub(time_width + 3);
     let total_width = time_width + 2 + bar_width;
@@ -263,7 +275,9 @@ pub fn render_progress_bar(
 
     let bar_start = start_x + time_width + 2;
     if bar_width > 0 {
-        let filled = (bar_width as f64 * progress) as u16;
+        // f64->u16 `as` saturates; bar_width*progress(0.0..=1.0) is bounded by bar_width.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let filled = (f64::from(bar_width) * progress) as u16;
 
         for x in bar_start..(bar_start + filled) {
             buf[(x, area.y)]

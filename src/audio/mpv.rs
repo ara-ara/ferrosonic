@@ -73,16 +73,33 @@ pub struct MpvController {
     process: Option<Child>,
     request_id: AtomicU64,
     writer: Option<OwnedWriteHalf>,
-    /// Outstanding requests keyed by request_id; reader task resolves.
+    /// Outstanding requests keyed by `request_id`; reader task resolves.
     pending: PendingMap,
     /// Background reader task; aborted on disconnect/shutdown.
     reader_handle: Option<tokio::task::JoinHandle<()>>,
     /// Broadcast of typed mpv events to daemon consumers.
     event_tx: tokio::sync::broadcast::Sender<MpvEventKind>,
+    /// `(major, minor)` from `mpv-version`, probed on connect. `None` until
+    /// probed or if the probe fails; gates the 0.38+ 5-arg loadfile form.
+    mpv_version: Option<(u16, u16)>,
+}
+
+/// Parse `(major, minor)` from an mpv version string such as `mpv 0.41.0`.
+fn parse_mpv_version(raw: &str) -> Option<(u16, u16)> {
+    let start = raw.find(|c: char| c.is_ascii_digit())?;
+    let digits: String = raw[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = digits.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
 }
 
 impl MpvController {
     /// Construct against the default runtime-dir socket path.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_socket_path(mpv_socket_path())
     }
@@ -95,6 +112,7 @@ impl MpvController {
     /// let mut ctrl = MpvController::with_socket_path(PathBuf::from("/tmp/ferrosonic-doctest.sock"));
     /// assert!(!ctrl.is_running(), "fresh controller has no IPC yet");
     /// ```
+    #[must_use]
     pub fn with_socket_path(socket_path: PathBuf) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAP);
         Self {
@@ -105,7 +123,22 @@ impl MpvController {
             pending: Arc::new(TokioMutex::new(HashMap::new())),
             reader_handle: None,
             event_tx,
+            mpv_version: None,
         }
+    }
+
+    /// `(major, minor)` of the connected mpv, or `None` if not yet probed.
+    #[must_use]
+    pub const fn mpv_version(&self) -> Option<(u16, u16)> {
+        self.mpv_version
+    }
+
+    /// Whether the connected mpv supports the 0.38+ 5-arg `loadfile` insertion
+    /// index (and thus the `start=` decode-from-offset form). Unknown version
+    /// is treated as capable, since modern mpv is the common case.
+    #[must_use]
+    pub fn supports_loadfile_index(&self) -> bool {
+        self.mpv_version.is_none_or(|v| v >= (0, 38))
     }
 
     /// Subscribe to the typed event stream. Multiple subscribers are supported; each gets every event from subscription onwards. Channel capacity is fixed at [`EVENT_CHANNEL_CAP`]; slow consumers see `RecvError::Lagged`.
@@ -122,6 +155,9 @@ impl MpvController {
     }
 
     /// Test seam: connect to an mpv socket that's already listening.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn connect_to_existing(&mut self) -> Result<(), AudioError> {
         if !self.socket_path.exists() {
             return Err(AudioError::MpvIpc(format!(
@@ -133,6 +169,9 @@ impl MpvController {
     }
 
     /// Spawn mpv (if not already alive) and connect to its IPC socket.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn start(&mut self) -> Result<(), AudioError> {
         // Reap an exited child so a fresh mpv can be spawned. Without
         // this, an mpv crash leaves self.process = Some(<exited Child>)
@@ -160,6 +199,8 @@ impl MpvController {
         cmd.arg("--idle")
             .arg("--no-video")
             .arg("--no-terminal")
+            // Name the PipeWire stream so mixers don't match a foreign mpv .desktop entry.
+            .arg("--audio-client-name=ferrosonic")
             .arg("--gapless-audio=yes")
             .arg("--prefetch-playlist=yes")
             .arg("--cache=yes")
@@ -215,8 +256,26 @@ impl MpvController {
         let handle = tokio::spawn(reader_loop(BufReader::new(read_half), pending, events));
         self.reader_handle = Some(handle);
 
-        debug!("Connected to MPV socket");
+        self.mpv_version = self.probe_mpv_version().await;
+        debug!("Connected to MPV socket (version {:?})", self.mpv_version);
         Ok(())
+    }
+
+    /// Read and parse `mpv-version`; `None` if the property is missing or
+    /// unparseable. A transport failure is logged (not silently dropped) and
+    /// also yields `None`, which `supports_loadfile_index` treats as capable.
+    async fn probe_mpv_version(&mut self) -> Option<(u16, u16)> {
+        let data = match self
+            .send_command(vec![json!("get_property"), json!("mpv-version")])
+            .await
+        {
+            Ok(data) => data?,
+            Err(e) => {
+                warn!("Could not probe mpv version ({e}); assuming a modern loadfile contract");
+                return None;
+            }
+        };
+        parse_mpv_version(data.as_str()?)
     }
 
     async fn tear_down_connection(&mut self) {
@@ -249,9 +308,10 @@ impl MpvController {
         }
         match self.process.as_mut() {
             None => self.writer.is_some(),
-            Some(child) => match child.try_wait() {
-                Ok(None) => true,
-                Ok(Some(_)) => {
+            Some(child) => {
+                if matches!(child.try_wait(), Ok(None)) {
+                    true
+                } else {
                     self.writer = None;
                     self.process = None;
                     if let Some(h) = self.reader_handle.take() {
@@ -259,15 +319,7 @@ impl MpvController {
                     }
                     false
                 }
-                Err(_) => {
-                    self.writer = None;
-                    self.process = None;
-                    if let Some(h) = self.reader_handle.take() {
-                        h.abort();
-                    }
-                    false
-                }
-            },
+            }
         }
     }
 
@@ -308,14 +360,16 @@ impl MpvController {
             Err(_) => {
                 self.pending.lock().await.remove(&request_id);
                 Err(AudioError::MpvIpc(format!(
-                    "mpv command timeout after {:?} (req {})",
-                    COMMAND_DEADLINE, request_id
+                    "mpv command timeout after {COMMAND_DEADLINE:?} (req {request_id})"
                 )))
             }
         }
     }
 
     /// Replace the playlist with `path` and start playing it.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn loadfile(&mut self, path: &str) -> Result<(), AudioError> {
         info!("Loading: {}", path.split('?').next().unwrap_or(path));
         self.send_command(vec![json!("loadfile"), json!(path), json!("replace")])
@@ -348,6 +402,9 @@ impl MpvController {
     }
 
     /// Append `path` to the playlist without interrupting playback.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn loadfile_append(&mut self, path: &str) -> Result<(), AudioError> {
         debug!(
             "Appending to playlist: {}",
@@ -359,6 +416,9 @@ impl MpvController {
     }
 
     /// Remove the playlist entry at `index`.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn playlist_remove(&mut self, index: usize) -> Result<(), AudioError> {
         debug!("Removing playlist entry {}", index);
         self.send_command(vec![json!("playlist-remove"), json!(index)])
@@ -367,6 +427,9 @@ impl MpvController {
     }
 
     /// Advance to the next playlist entry, forcing past the last one.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn playlist_next(&mut self) -> Result<(), AudioError> {
         debug!("Advancing to next playlist entry");
         // `force` advances even at the last entry; we always control
@@ -377,6 +440,9 @@ impl MpvController {
     }
 
     /// Current playlist position, or `None` when nothing is loaded.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_playlist_pos(&mut self) -> Result<Option<i64>, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("playlist-pos")])
@@ -385,14 +451,22 @@ impl MpvController {
     }
 
     /// Number of playlist entries; 0 when unavailable.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_playlist_count(&mut self) -> Result<usize, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("playlist-count")])
             .await?;
-        Ok(data.and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+        Ok(crate::num::usize_sat(
+            data.and_then(|v| v.as_u64()).unwrap_or(0),
+        ))
     }
 
     /// Pause playback. Idempotent if already paused.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn pause(&mut self) -> Result<(), AudioError> {
         debug!("Pausing playback");
         self.send_command(vec![json!("set_property"), json!("pause"), json!(true)])
@@ -401,6 +475,9 @@ impl MpvController {
     }
 
     /// Resume playback. Idempotent if already playing.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn resume(&mut self) -> Result<(), AudioError> {
         debug!("Resuming playback");
         self.send_command(vec![json!("set_property"), json!("pause"), json!(false)])
@@ -409,6 +486,9 @@ impl MpvController {
     }
 
     /// Flip the pause state; returns `true` when playback is now paused.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn toggle_pause(&mut self) -> Result<bool, AudioError> {
         let paused = self.is_paused().await?;
         if paused {
@@ -420,6 +500,9 @@ impl MpvController {
     }
 
     /// Whether playback is currently paused; `false` when unknown.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn is_paused(&mut self) -> Result<bool, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("pause")])
@@ -428,6 +511,9 @@ impl MpvController {
     }
 
     /// Stop playback and unload the current file.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn stop(&mut self) -> Result<(), AudioError> {
         debug!("Stopping playback");
         self.send_command(vec![json!("stop")]).await?;
@@ -435,6 +521,9 @@ impl MpvController {
     }
 
     /// Seek to an absolute position in seconds.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn seek(&mut self, position: f64) -> Result<(), AudioError> {
         debug!("Seeking to {:.1}s", position);
         self.send_command(vec![json!("seek"), json!(position), json!("absolute")])
@@ -443,6 +532,9 @@ impl MpvController {
     }
 
     /// Seek by a signed offset in seconds from the current position.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn seek_relative(&mut self, offset: f64) -> Result<(), AudioError> {
         debug!("Seeking {:+.1}s", offset);
         self.send_command(vec![json!("seek"), json!(offset), json!("relative")])
@@ -451,6 +543,9 @@ impl MpvController {
     }
 
     /// Playback position in seconds; 0.0 when unknown.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_time_pos(&mut self) -> Result<f64, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("time-pos")])
@@ -459,6 +554,9 @@ impl MpvController {
     }
 
     /// Track duration in seconds; 0.0 when unknown.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_duration(&mut self) -> Result<f64, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("duration")])
@@ -467,6 +565,9 @@ impl MpvController {
     }
 
     /// Set playback volume, clamped to 0-100.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn set_volume(&mut self, volume: i32) -> Result<(), AudioError> {
         debug!("Setting volume to {}", volume);
         self.send_command(vec![
@@ -479,6 +580,9 @@ impl MpvController {
     }
 
     /// Decoded sample rate in Hz of the playing track.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_sample_rate(&mut self) -> Result<Option<u32>, AudioError> {
         let data = self
             .send_command(vec![
@@ -486,10 +590,13 @@ impl MpvController {
                 json!("audio-params/samplerate"),
             ])
             .await?;
-        Ok(data.and_then(|v| v.as_u64()).map(|v| v as u32))
+        Ok(data.and_then(|v| v.as_u64()).map(crate::num::u32_sat))
     }
 
     /// Bit depth inferred from mpv's audio format string.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_bit_depth(&mut self) -> Result<Option<u32>, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("audio-params/format")])
@@ -502,7 +609,7 @@ impl MpvController {
                 Some(24)
             } else if f.contains("16") {
                 Some(16)
-            } else if f.contains("8") {
+            } else if f.contains('8') {
                 Some(8)
             } else {
                 None
@@ -511,6 +618,9 @@ impl MpvController {
     }
 
     /// Raw mpv audio format string, e.g. `"s32"` or `"floatp"`.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_audio_format(&mut self) -> Result<Option<String>, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("audio-params/format")])
@@ -519,6 +629,9 @@ impl MpvController {
     }
 
     /// Channel layout label, e.g. `"Stereo"` or `"5ch"`.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_channels(&mut self) -> Result<Option<String>, AudioError> {
         let data = self
             .send_command(vec![
@@ -526,15 +639,18 @@ impl MpvController {
                 json!("audio-params/channel-count"),
             ])
             .await?;
-        let count = data.and_then(|v| v.as_u64()).map(|v| v as u32);
+        let count = data.and_then(|v| v.as_u64()).map(crate::num::u32_sat);
         Ok(count.map(|c| match c {
             1 => "Mono".to_string(),
             2 => "Stereo".to_string(),
-            n => format!("{}ch", n),
+            n => format!("{n}ch"),
         }))
     }
 
     /// Whether mpv reports idle (nothing loaded); `true` when unknown.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn is_idle(&mut self) -> Result<bool, AudioError> {
         let data = self
             .send_command(vec![json!("get_property"), json!("idle-active")])
@@ -557,6 +673,9 @@ impl MpvController {
     }
 
     /// Ask mpv to quit gracefully, then force-kill and clean up.
+    ///
+    /// # Errors
+    /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn quit(&mut self) -> Result<(), AudioError> {
         if self.writer.is_some() {
             let _ = self.send_command(vec![json!("quit")]).await;
@@ -595,7 +714,8 @@ async fn reader_loop(
             Ok(_) => {
                 if let Ok(resp) = serde_json::from_str::<MpvResponse>(&line) {
                     if let Some(req_id) = resp.request_id {
-                        if let Some(tx) = pending.lock().await.remove(&req_id) {
+                        let removed = pending.lock().await.remove(&req_id);
+                        if let Some(tx) = removed {
                             let payload = if resp.error == "success" {
                                 Ok(resp.data)
                             } else {
@@ -642,5 +762,44 @@ mod fuzz {
             let _ = serde_json::from_slice::<MpvResponse>(input);
             let _ = serde_json::from_slice::<MpvEvent>(input);
         });
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn parses_standard_property_string() {
+        assert_eq!(parse_mpv_version("mpv 0.41.0"), Some((0, 41)));
+        assert_eq!(parse_mpv_version("mpv 0.35.1"), Some((0, 35)));
+    }
+
+    #[test]
+    fn parses_dashed_and_suffixed_forms() {
+        assert_eq!(parse_mpv_version("mpv-0.38.0-dirty"), Some((0, 38)));
+        assert_eq!(parse_mpv_version("0.37.0"), Some((0, 37)));
+    }
+
+    #[test]
+    fn unparseable_is_none() {
+        assert_eq!(parse_mpv_version(""), None);
+        assert_eq!(parse_mpv_version("mpv"), None);
+        assert_eq!(parse_mpv_version("v0"), None);
+    }
+
+    #[test]
+    fn supports_index_gates_at_0_38() {
+        let mut c = MpvController::with_socket_path(std::path::PathBuf::from("/tmp/x.sock"));
+        assert!(
+            c.supports_loadfile_index(),
+            "unknown version assumed capable"
+        );
+        c.mpv_version = Some((0, 37));
+        assert!(!c.supports_loadfile_index());
+        c.mpv_version = Some((0, 38));
+        assert!(c.supports_loadfile_index());
+        c.mpv_version = Some((0, 41));
+        assert!(c.supports_loadfile_index());
     }
 }

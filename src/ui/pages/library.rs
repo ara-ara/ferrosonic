@@ -460,6 +460,19 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
     render_songs(frame, chunks[1], state, &colors);
 }
 
+/// Library-pane label for the active music folder: the folder name, or "All".
+// Converting nests map_or_else inside map_or_else; one match level is clearer.
+#[allow(clippy::option_if_let_else)]
+fn library_label(id: Option<i64>, folders: &[crate::subsonic::models::MusicFolder]) -> String {
+    match id {
+        None => "Library: All".to_string(),
+        Some(id) => folders.iter().find(|f| f.id == id).map_or_else(
+            || format!("Library: #{id}"),
+            |f| format!("Library: {}", f.name),
+        ),
+    }
+}
+
 fn render_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, colors: &ThemeColors) {
     let artists = &state.client.artists;
 
@@ -480,11 +493,19 @@ fn render_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, colo
 
     let album_view = artists.view == crate::app::page_state::LibraryView::AlbumList;
 
+    let lib_label = library_label(
+        state.daemon.config.music_folder_id,
+        &state.daemon.library.music_folders,
+    );
+
     let base_block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style);
     let block = if searching {
-        base_block.title(format!(" Search ({}) ", artists.filter))
+        base_block.title(format!(
+            " Search ({})  \u{00b7}  {lib_label} ",
+            artists.filter
+        ))
     } else {
         // Toggle hint: Artists <-> Albums. The active mode shows in its accent
         // colour, the other label and the arrow are muted; they flip on 'v'.
@@ -506,10 +527,12 @@ fn render_tree(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, colo
         ];
         if album_view {
             let label = artists.album_sort.label();
-            spans.push(Span::styled(format!(" \u{00b7} {label} "), muted));
-        } else {
-            spans.push(Span::raw(" "));
+            spans.push(Span::styled(format!(" \u{00b7} {label}"), muted));
         }
+        spans.push(Span::styled(
+            format!(" \u{00b7} {lib_label} "),
+            Style::default().fg(colors.accent),
+        ));
         base_block.title(Line::from(spans))
     };
 
@@ -607,7 +630,7 @@ fn render_songs(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, col
     let has_multiple_discs = artists
         .songs
         .iter()
-        .any(|s| s.disc_number.map(|d| d > 1).unwrap_or(false));
+        .any(|s| s.disc_number.is_some_and(|d| d > 1));
 
     let items: Vec<ListItem<'_>> = artists
         .songs
@@ -615,10 +638,7 @@ fn render_songs(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, col
         .enumerate()
         .map(|(i, song)| {
             let is_selected = focused && Some(i) == artists.selected_song;
-            let is_playing = state
-                .current_song()
-                .map(|s| s.id == song.id)
-                .unwrap_or(false);
+            let is_playing = state.current_song().is_some_and(|s| s.id == song.id);
 
             let line = get_song_without_artist_line(
                 song,

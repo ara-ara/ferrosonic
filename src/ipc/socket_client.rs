@@ -35,6 +35,9 @@ pub struct SocketClient {
 
 impl SocketClient {
     /// Connect to the daemon socket and spawn the reader/writer tasks.
+    ///
+    /// # Errors
+    /// Returns an `IpcError` if the connection cannot be established.
     pub async fn connect(path: &Path) -> Result<Arc<Self>, IpcError> {
         let stream = UnixStream::connect(path).await?;
         let (read_half, mut write_half) = stream.into_split();
@@ -43,7 +46,7 @@ impl SocketClient {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
 
-        let client = Arc::new(SocketClient {
+        let client = Arc::new(Self {
             next_id: AtomicU64::new(1),
             writer_tx,
             pending: pending.clone(),
@@ -60,8 +63,8 @@ impl SocketClient {
             let _ = write_half.shutdown().await;
         });
 
-        let reader_pending = pending.clone();
-        let reader_events = event_tx.clone();
+        let reader_pending = pending;
+        let reader_events = event_tx;
         tokio::spawn(async move {
             let mut reader = read_half;
             loop {
@@ -86,8 +89,7 @@ impl SocketClient {
                         let mut map = reader_pending.lock().await;
                         if let Some(tx) = map.remove(&id) {
                             let _ = tx.send(Err(IpcError::Daemon(format!(
-                                "unknown response variant: {}",
-                                body
+                                "unknown response variant: {body}"
                             ))));
                         }
                     }
@@ -137,6 +139,7 @@ impl SocketClient {
 
 #[async_trait]
 impl DaemonClient for SocketClient {
+    #[allow(clippy::option_if_let_else)] // recv result -> Disconnected; explicit arms clearer.
     async fn request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -150,8 +153,8 @@ impl DaemonClient for SocketClient {
             .await
             .is_err()
         {
-            let mut map = self.pending.lock().await;
-            map.remove(&id);
+            self.pending.lock().await.remove(&id);
+
             return Err(IpcError::Disconnected);
         }
         match rx.await {

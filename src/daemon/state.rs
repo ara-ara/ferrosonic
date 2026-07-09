@@ -19,10 +19,14 @@ pub struct DaemonState {
     pub queue_position: Option<usize>,
     /// Cached library data fetched from the server.
     pub library: LibraryCache,
+    /// `(major, minor)` of the mpv driving playback; `None` until probed.
+    /// Set in [`crate::daemon::core::DaemonCore::snapshot`], not stored state.
+    pub mpv_version: Option<(u16, u16)>,
 }
 
 impl DaemonState {
     /// Fresh state carrying `config`, everything else default.
+    #[must_use]
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -31,6 +35,7 @@ impl DaemonState {
     }
 
     /// Song at the current queue position, if any.
+    #[must_use]
     pub fn current_song(&self) -> Option<&Child> {
         self.queue_position.and_then(|pos| self.queue.get(pos))
     }
@@ -81,6 +86,7 @@ impl NowPlaying {
     /// np.duration = 0.0;
     /// assert_eq!(np.progress_percent(), 0.0);
     /// ```
+    #[must_use]
     pub fn progress_percent(&self) -> f64 {
         if self.duration > 0.0 {
             (self.position / self.duration).clamp(0.0, 1.0)
@@ -97,6 +103,7 @@ impl NowPlaying {
     /// np.position = 65.0;
     /// assert_eq!(np.format_position(), "01:05");
     /// ```
+    #[must_use]
     pub fn format_position(&self) -> String {
         format_duration(self.position)
     }
@@ -109,6 +116,7 @@ impl NowPlaying {
     /// np.duration = 3665.0;
     /// assert_eq!(np.format_duration(), "01:01:05");
     /// ```
+    #[must_use]
     pub fn format_duration(&self) -> String {
         format_duration(self.duration)
     }
@@ -122,6 +130,9 @@ impl NowPlaying {
 /// assert_eq!(format_duration(125.0), "02:05");
 /// assert_eq!(format_duration(3600.0), "01:00:00");
 /// ```
+#[must_use]
+// f64->u64 `as` saturates (Rust >=1.45); a duration in seconds is non-negative.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn format_duration(seconds: f64) -> String {
     let total_secs = seconds as u64;
     let hours = total_secs / 3600;
@@ -129,8 +140,8 @@ pub fn format_duration(seconds: f64) -> String {
     let secs = total_secs % 60;
 
     if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, mins, secs)
+        format!("{hours:02}:{mins:02}:{secs:02}")
     } else {
-        format!("{:02}:{:02}", mins, secs)
+        format!("{mins:02}:{secs:02}")
     }
 }

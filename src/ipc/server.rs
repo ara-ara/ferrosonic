@@ -1,4 +1,4 @@
-//! Daemon-side IPC server: one task per connected client. L60_FILE exempt (temp): prompt 4 IPC hardening sprint will rewrite + add coverage.
+//! Daemon-side IPC server: one task per connected client. `L60_FILE` exempt (temp): prompt 4 IPC hardening sprint will rewrite + add coverage.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,21 +25,17 @@ const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Reserve two slots so the snapshot pair is sent atomically or not at all; partial sends would leave the client desynced.
 async fn try_send_resync(tx: &tokio::sync::mpsc::Sender<Frame>, core: &Arc<DaemonCore>) -> bool {
-    let p1 = match tx.try_reserve() {
-        Ok(p) => p,
-        Err(_) => return false,
+    let Ok(p1) = tx.try_reserve() else {
+        return false;
     };
-    let p2 = match tx.try_reserve() {
-        Ok(p) => p,
-        Err(_) => {
-            drop(p1);
-            return false;
-        }
+    let Ok(p2) = tx.try_reserve() else {
+        drop(p1);
+        return false;
     };
     let snap = core.snapshot().await;
-    p1.send(Frame::Event(DaemonEvent::NowPlayingChanged(
+    p1.send(Frame::Event(DaemonEvent::NowPlayingChanged(Box::new(
         snap.now_playing.clone(),
-    )));
+    ))));
     p2.send(Frame::Event(DaemonEvent::QueueChanged {
         queue: snap.queue.clone(),
         position: snap.queue_position,
@@ -47,7 +43,7 @@ async fn try_send_resync(tx: &tokio::sync::mpsc::Sender<Frame>, core: &Arc<Daemo
     true
 }
 
-/// Mask password/secret values via serde_json round-trip; on parse failure returns a placeholder so a malformed body containing a password is never logged raw.
+/// Mask password/secret values via `serde_json` round-trip; on parse failure returns a placeholder so a malformed body containing a password is never logged raw.
 fn redact_secrets_in_body(body: &str) -> String {
     let mut val: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -79,6 +75,9 @@ fn redact_in_value(v: &mut serde_json::Value) {
 }
 
 /// `Err` only on bind failure; per-connection errors are logged.
+///
+/// # Errors
+/// Returns an `io::Error` if binding or serving the socket fails.
 pub async fn serve(core: Arc<DaemonCore>, path: &Path) -> std::io::Result<()> {
     ensure_parent_dir(path)?;
     let _lock = acquire_socket_lock(path)?;
@@ -90,7 +89,7 @@ pub async fn serve(core: Arc<DaemonCore>, path: &Path) -> std::io::Result<()> {
     loop {
         tokio::select! {
             biased;
-            _ = core.shutdown_signal() => {
+            () = core.shutdown_signal() => {
                 info!("shutdown signalled; IPC accept loop exiting");
                 return Ok(());
             }
@@ -113,7 +112,7 @@ pub async fn serve(core: Arc<DaemonCore>, path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Holds lock for daemon lifetime so two daemons cannot race past handle_stale_socket.
+/// Holds lock for daemon lifetime so two daemons cannot race past `handle_stale_socket`.
 fn acquire_socket_lock(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::io::AsRawFd;
     let lock_path = path.with_extension("lock");
@@ -142,19 +141,20 @@ async fn handle_stale_socket(path: &Path) -> std::io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    match UnixStream::connect(path).await {
-        Ok(_) => Err(std::io::Error::new(
+    if UnixStream::connect(path).await.is_ok() {
+        Err(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
             format!("daemon already running at {}", path.display()),
-        )),
-        Err(_) => {
-            debug!("Removing stale socket at {}", path.display());
-            std::fs::remove_file(path)?;
-            Ok(())
-        }
+        ))
+    } else {
+        debug!("Removing stale socket at {}", path.display());
+        std::fs::remove_file(path)?;
+        Ok(())
     }
 }
 
+// Cohesive single match/render; splitting would fragment one logical unit.
+#[allow(clippy::too_many_lines)]
 async fn handle_connection(core: Arc<DaemonCore>, stream: UnixStream) -> Result<(), FrameError> {
     // Counts toward active_clients for the connection's lifetime; the idle-exit
     // monitor only shuts down when this reaches 0.
@@ -212,8 +212,7 @@ async fn handle_connection(core: Arc<DaemonCore>, stream: UnixStream) -> Result<
                 _ = retry.tick() => {
                     if needs_resync {
                         let due = last_resync_at
-                            .map(|t| t.elapsed() >= std::time::Duration::from_millis(500))
-                            .unwrap_or(true);
+                            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(500));
                         if due
                             && try_send_resync(&event_writer_tx, &event_core).await
                         {
@@ -278,7 +277,7 @@ async fn handle_connection(core: Arc<DaemonCore>, stream: UnixStream) -> Result<
                 );
                 let resp = Frame::Response {
                     id,
-                    payload: Err(format!("unknown request variant: {}", redacted)),
+                    payload: Err(format!("unknown request variant: {redacted}")),
                 };
                 let _ = writer_tx.send(resp).await;
             }

@@ -24,6 +24,8 @@ enum Item {
 }
 
 /// Render the Settings page.
+// Cohesive single match/render; splitting would fragment one logical unit.
+#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
     let colors = *state.client.settings_state.theme_colors();
 
@@ -39,26 +41,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
         return;
     }
 
-    let s = &state.client.settings_state;
+    let settings = &state.client.settings_state;
     let cava_ok = state.client.cava_available;
-    let sel = s.selected_field;
+    let sel = settings.selected_field;
 
-    let theme_val = s.theme_name().to_string();
+    let theme_val = settings.theme_name().to_string();
     let cava_val = if !cava_ok {
         "Off (cava not found)".to_string()
-    } else if s.cava_enabled {
+    } else if settings.cava_enabled {
         "On".into()
     } else {
         "Off".into()
     };
-    let cava_size_val = if !cava_ok {
-        "N/A".into()
+    let cava_size_val = if cava_ok {
+        format!("{}%", settings.cava_size)
     } else {
-        format!("{}%", s.cava_size)
+        "N/A".into()
     };
-    let cover_val = if s.cover_art { "On" } else { "Off" }.to_string();
-    let cover_size_val = format!("{} rows", s.cover_art_size);
-    let repeat_val = match s.repeat_mode {
+    let cover_val = if settings.cover_art { "On" } else { "Off" }.to_string();
+    let cover_size_val = format!("{} rows", settings.cover_art_size);
+    let repeat_val = match settings.repeat_mode {
         crate::config::RepeatMode::Off => "Off",
         crate::config::RepeatMode::One => "One",
         crate::config::RepeatMode::All => "All",
@@ -67,6 +69,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
     let auto_val = if s.auto_continue { "On" } else { "Off" }.to_string();
     let scrobble_val = if s.scrobble { "On" } else { "Off" }.to_string();
     let daemon_val = if s.daemon_enabled { "On" } else { "Off" }.to_string();
+    let auto_val = if settings.auto_continue { "On" } else { "Off" }.to_string();
+    let scrobble_val = if settings.scrobble { "On" } else { "Off" }.to_string();
+    let daemon_val = if settings.daemon_enabled { "On" } else { "Off" }.to_string();
+    let notifications_val = if settings.notifications { "On" } else { "Off" }.to_string();
 
     let x = inner.x;
     let w = inner.width;
@@ -138,8 +144,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
             .unwrap_or(0);
         let start = sel_idx.saturating_sub(visible.saturating_sub(1));
         let buf = frame.buffer_mut();
-        let mut y = inner.y;
-        for item in items.iter().skip(start) {
+        for (y, item) in (inner.y..).zip(items.iter().skip(start)) {
             if y >= row_limit {
                 break;
             }
@@ -157,11 +162,25 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>) {
                 }
                 Item::Gap => {}
             }
-            y += 1;
         }
     }
 
     let help_text = match sel {
+    let help_text = settings_help_text(sel, cava_ok);
+    let help_y = inner.y + inner.height.saturating_sub(1);
+    let help = Paragraph::new(help_text).style(Style::default().fg(colors.muted));
+    help.render(
+        Rect::new(inner.x, help_y, inner.width, 1),
+        frame.buffer_mut(),
+    );
+}
+
+/// Help-line text for the selected settings field. Indices MUST track the
+/// `Item::Row { idx }` order in `render`: 7 Scrobble, 8 Daemon, 9 Notifications.
+// Each setting's cava-ok/not-installed cases kept adjacent; merging would split setting 2.
+#[allow(clippy::match_same_arms)]
+const fn settings_help_text(sel: usize, cava_ok: bool) -> &'static str {
+    match sel {
         0 => "← → or Enter to change theme (auto-saves)",
         1 if cava_ok => "← → or Enter to toggle cava visualizer (auto-saves)",
         1 => "cava is not installed on this system",

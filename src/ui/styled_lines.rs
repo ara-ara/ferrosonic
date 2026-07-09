@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 /// Styled row for a song with its artist name shown.
+#[must_use]
 pub fn get_song_with_artist_line<'a>(
     song: &Child,
     is_selected: bool,
@@ -21,10 +22,7 @@ pub fn get_song_with_artist_line<'a>(
     let indicator = if is_playing { "▶ " } else { "  " };
 
     let (title_color, artist_color, duration_color) = get_colors(is_selected, is_playing, colors);
-    let artist = match &song.artist {
-        Some(value) => value,
-        None => "n/a",
-    };
+    let artist = song.artist.as_deref().unwrap_or("n/a");
 
     let line = Line::from(vec![
         Span::styled(indicator.to_string(), Style::default().fg(colors.playing)),
@@ -33,7 +31,7 @@ pub fn get_song_with_artist_line<'a>(
             Style::default().fg(colors.playing),
         ),
         Span::styled(song.title.clone(), Style::default().fg(title_color)),
-        Span::styled(format!(" - {}", artist), Style::default().fg(artist_color)),
+        Span::styled(format!(" - {artist}"), Style::default().fg(artist_color)),
         Span::styled(
             format!(" [{}]", song.format_duration()),
             Style::default().fg(duration_color),
@@ -44,6 +42,7 @@ pub fn get_song_with_artist_line<'a>(
 }
 
 /// Styled row for a song without the artist name.
+#[must_use]
 pub fn get_song_without_artist_line<'a>(
     song: &Child,
     is_selected: bool,
@@ -60,14 +59,12 @@ pub fn get_song_without_artist_line<'a>(
 
     let track = if has_multiple_discs {
         match (song.disc_number, song.track) {
-            (Some(d), Some(t)) => format!("{}.{:02}. ", d, t),
-            (None, Some(t)) => format!("{:02}. ", t),
+            (Some(d), Some(t)) => format!("{d}.{t:02}. "),
+            (None, Some(t)) => format!("{t:02}. "),
             _ => String::new(),
         }
     } else {
-        song.track
-            .map(|t| format!("{:02}. ", t))
-            .unwrap_or_default()
+        song.track.map(|t| format!("{t:02}. ")).unwrap_or_default()
     };
 
     let duration = song.format_duration();
@@ -82,14 +79,18 @@ pub fn get_song_without_artist_line<'a>(
         Span::styled(track, Style::default().fg(track_color)),
         Span::styled(title, Style::default().fg(title_color)),
         Span::styled(
-            format!(" [{}]", duration),
+            format!(" [{duration}]"),
             Style::default().fg(duration_color),
         ),
     ]);
     line
 }
 
-fn get_colors(is_selected: bool, is_playing: bool, colors: &ThemeColors) -> (Color, Color, Color) {
+const fn get_colors(
+    is_selected: bool,
+    is_playing: bool,
+    colors: &ThemeColors,
+) -> (Color, Color, Color) {
     if is_selected {
         (
             colors.highlight_fg,

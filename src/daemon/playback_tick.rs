@@ -2,14 +2,36 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
 use crate::daemon::core::DaemonCore;
 use crate::ipc::protocol::DaemonEvent;
 
+/// Window after a loadfile during which mpv may still report a stale
+/// idle-active; the tick ignores idle within it.
+const JUST_LOADED_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Minimum spacing between preload attempts while the network keeps failing.
+const PRELOAD_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Whether a loadfile stamped at `last` is still within the just-loaded window
+/// as of `now`. Pure so the 1500ms edge is mutation-testable without a clock.
+fn within_just_loaded_window(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|t| now.duration_since(t) < JUST_LOADED_WINDOW)
+}
+
+/// Whether a preload attempt is due: never attempted, or the backoff elapsed
+/// since `last` as of `now`. Pure so the 5s edge is mutation-testable.
+fn preload_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= PRELOAD_BACKOFF)
+}
+
 /// Owned snapshot of every read the playback tick needs to decide an action.
 #[derive(Debug, Clone, Copy, PartialEq)]
+// Snapshot of distinct simultaneous runtime conditions; orthogonal, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 struct PlaybackTickInputs {
     is_active: bool,
     is_playing: bool,
@@ -25,7 +47,7 @@ struct PlaybackTickInputs {
     just_loaded: bool,
 }
 
-/// Outcome of one playback tick. Branch priority: AdvanceEarly > Preload > GaplessAdvance > AdvanceOnIdle.
+/// Outcome of one playback tick. Branch priority: `AdvanceEarly` > Preload > `GaplessAdvance` > `AdvanceOnIdle`.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaybackTickAction {
@@ -45,7 +67,7 @@ enum TickContinuation {
     Continue,
 }
 
-/// Result of try_gapless_advance under the write critical section.
+/// Result of `try_gapless_advance` under the write critical section.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GaplessOutcome {
@@ -62,6 +84,7 @@ impl DaemonCore {
             let state = self.state.read().await;
             let pl = state.now_playing.state == PlaybackState::Playing;
             let active = pl || state.now_playing.state == PlaybackState::Paused;
+            drop(state);
             (pl, active)
         };
 
@@ -92,8 +115,7 @@ impl DaemonCore {
             let tr = state.now_playing.duration - state.now_playing.position;
             let hn = state
                 .queue_position
-                .map(|p| p + 1 < state.queue.len())
-                .unwrap_or(false);
+                .is_some_and(|p| p + 1 < state.queue.len());
             (tr, hn, state.now_playing.position, state.queue_position)
         };
 
@@ -102,6 +124,7 @@ impl DaemonCore {
             let c = mpv.get_playlist_count().await.ok();
             let p = mpv.get_playlist_pos().await.ok().flatten();
             let i = mpv.is_idle().await.ok();
+            drop(mpv);
             (c, p, i)
         };
 
@@ -110,15 +133,15 @@ impl DaemonCore {
             .lock()
             .await
             .as_ref()
-            .map(|a| a.load(Ordering::Acquire))
-            .unwrap_or(false);
+            .is_some_and(|a| a.load(Ordering::Acquire));
 
-        let just_loaded = self
-            .last_loadfile
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
-            .unwrap_or(false);
+        let just_loaded = within_just_loaded_window(
+            *self
+                .last_loadfile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Instant::now(),
+        );
 
         PlaybackTickInputs {
             is_active,
@@ -136,7 +159,7 @@ impl DaemonCore {
         }
     }
 
-    /// Pure state-machine. Priority: AdvanceEarly > Preload > GaplessAdvance > AdvanceOnIdle.
+    /// Pure state-machine. Priority: `AdvanceEarly` > Preload > `GaplessAdvance` > `AdvanceOnIdle`.
     const fn decide_playback_tick_action(inputs: &PlaybackTickInputs) -> PlaybackTickAction {
         if !inputs.is_active || !inputs.mpv_running {
             return PlaybackTickAction::Skip;
@@ -182,15 +205,23 @@ impl DaemonCore {
             let queue_len = state.queue.len();
             let repeat = state.config.repeat_mode;
             let resolved = state.queue_position.and_then(|cur| {
+            let cur = state.queue_position;
+            let resolved = cur.and_then(|c| {
                 repeat
                     .next_auto(cur, queue_len)
                     .and_then(|n| state.queue.get(n).map(|s| (n, s.clone())))
             });
             if let Some((next_pos, song)) = resolved {
                 state.queue_position = Some(next_pos);
-                state.now_playing.song = Some(song.clone());
+                state.now_playing.duration = f64::from(song.duration.unwrap_or(0));
+                state.now_playing.song = Some(song);
                 state.now_playing.position = 0.0;
                 state.now_playing.duration = song.duration.unwrap_or(0) as f64;
+                // Clear so the tick re-probes + re-pins; a gapless jump across
+                // sample rates must not stay pinned to the previous track's rate.
+                state.now_playing.sample_rate = None;
+                state.now_playing.bit_depth = None;
+                drop(state);
                 Some(next_pos)
             } else {
                 None
@@ -205,6 +236,7 @@ impl DaemonCore {
             let pos_now = mpv.get_playlist_pos().await.ok().flatten();
             if matches!(pos_now, Some(1)) {
                 let _ = mpv.playlist_remove(0).await;
+                drop(mpv);
             } else {
                 warn!(
                     "playlist-pos shifted from 1 to {:?} before remove; skipping",
@@ -224,11 +256,9 @@ impl DaemonCore {
             .last_preload_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let due = last
-            .map(|t| t.elapsed() >= std::time::Duration::from_secs(5))
-            .unwrap_or(true);
+        let due = preload_due(*last, Instant::now());
         if due {
-            *last = Some(std::time::Instant::now());
+            *last = Some(Instant::now());
         }
         due
     }
@@ -265,7 +295,7 @@ impl DaemonCore {
         }
     }
 
-    /// Emit a PositionTick event with mpv's current playhead.
+    /// Emit a `PositionTick` event with mpv's current playhead.
     async fn tick_emit_position(self: &Arc<Self>) {
         use crate::daemon::state::PlaybackState;
         let pos_opt = {
@@ -570,6 +600,51 @@ mod playback_tick_tests {
         assert_ne!(TickContinuation::Stop, TickContinuation::Continue);
         assert_eq!(GaplessOutcome::Advanced, GaplessOutcome::Advanced);
         assert_ne!(GaplessOutcome::Advanced, GaplessOutcome::QueueRanOut);
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::{preload_due, within_just_loaded_window, PRELOAD_BACKOFF};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn just_loaded_window_edge_is_exclusive_at_1500ms() {
+        let base = Instant::now();
+        assert!(
+            within_just_loaded_window(Some(base), base + Duration::from_millis(1499)),
+            "1499ms after a loadfile is still inside the just-loaded window"
+        );
+        assert!(
+            !within_just_loaded_window(Some(base), base + Duration::from_millis(1500)),
+            "1500ms after a loadfile is outside the window (idle-advance allowed)"
+        );
+        assert!(
+            !within_just_loaded_window(None, base),
+            "no loadfile recorded is never within the window"
+        );
+    }
+
+    #[test]
+    fn preload_due_edge_is_inclusive_at_backoff() {
+        let base = Instant::now();
+        assert!(
+            !preload_due(
+                Some(base),
+                (base + PRELOAD_BACKOFF)
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap()
+            ),
+            "just under the backoff is not yet due"
+        );
+        assert!(
+            preload_due(Some(base), base + PRELOAD_BACKOFF),
+            "exactly at the backoff is due"
+        );
+        assert!(
+            preload_due(None, base),
+            "never-attempted preload is always due"
+        );
     }
 }
 

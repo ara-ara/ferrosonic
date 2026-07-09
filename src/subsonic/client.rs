@@ -1,5 +1,6 @@
 //! Subsonic API client
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use reqwest::Client;
@@ -7,7 +8,11 @@ use tracing::{debug, info};
 use url::Url;
 
 use super::auth::generate_auth_params;
-use super::models::*;
+use super::models::{
+    Album, AlbumData, AlbumList2Data, Artist, ArtistData, ArtistsData, Child, MusicFolder,
+    MusicFoldersData, OpenSubsonicExtensionsData, PingData, Playlist, PlaylistData, PlaylistsData,
+    RandomSongsData, Search3Data, SearchResult3, StarredSongsData, SubsonicResponse,
+};
 use crate::error::SubsonicError;
 use crate::secret::Secret;
 
@@ -22,10 +27,15 @@ pub struct SubsonicClient {
     /// Arc shares the secret across clones without duplicating the heap bytes.
     password: Arc<Secret>,
     http: Client,
+    /// Library to scope browse calls to; `None` means all libraries.
+    music_folder_id: Option<i64>,
 }
 
 impl SubsonicClient {
     /// Build a client for `base_url` with token-auth credentials.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub fn new(base_url: &str, username: &str, password: &Secret) -> Result<Self, SubsonicError> {
         let base_url = Url::parse(base_url)?;
 
@@ -39,16 +49,35 @@ impl SubsonicClient {
             username: username.to_string(),
             password: Arc::new(password.clone()),
             http,
+            music_folder_id: None,
         })
     }
 
+    /// Scope subsequent browse calls to one library, or all when `None`.
+    pub const fn set_music_folder(&mut self, id: Option<i64>) {
+        self.music_folder_id = id;
+    }
+
+    /// Append `musicFolderId` to `endpoint` when a library is selected,
+    /// choosing `?` or `&` by whether the endpoint already has a query.
+    fn with_folder(&self, endpoint: String) -> String {
+        match self.music_folder_id {
+            Some(id) => {
+                let sep = if endpoint.contains('?') { '&' } else { '?' };
+                format!("{endpoint}{sep}musicFolderId={id}")
+            }
+            None => endpoint,
+        }
+    }
+
     #[doc(hidden)]
+    #[must_use]
     pub fn base_url(&self) -> &str {
         self.base_url.as_str()
     }
 
     fn build_url(&self, endpoint: &str) -> Result<Url, SubsonicError> {
-        let mut url = self.base_url.join(&format!("rest/{}", endpoint))?;
+        let mut url = self.base_url.join(&format!("rest/{endpoint}"))?;
 
         let (salt, token) = generate_auth_params(&self.password);
 
@@ -68,7 +97,7 @@ impl SubsonicClient {
         let response = self.http.get(url).send().await?;
         let text = response.text().await?;
         let parsed: SubsonicResponse<serde_json::Value> = serde_json::from_str(&text)
-            .map_err(|e| SubsonicError::Parse(format!("Failed to parse response: {}", e)))?;
+            .map_err(|e| SubsonicError::Parse(format!("Failed to parse response: {e}")))?;
         let inner = parsed.subsonic_response;
         if inner.status != "ok" {
             let (code, message) = match inner.error {
@@ -81,6 +110,9 @@ impl SubsonicClient {
     }
 
     /// Server-side search across artists, albums, and songs.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn search3(
         &self,
         query: &str,
@@ -95,23 +127,32 @@ impl SubsonicClient {
             album_count,
             song_count,
         );
-        let data: Search3Data = self.request(&endpoint).await?;
+        let data: Search3Data = self.request(&self.with_folder(endpoint)).await?;
         Ok(data.result)
     }
 
     /// Star the song with `id`.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn star_song(&self, id: &str) -> Result<(), SubsonicError> {
         self.request_action(&format!("star?id={}", urlencoding::encode(id)))
             .await
     }
 
     /// Remove the star from the song with `id`.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn unstar_song(&self, id: &str) -> Result<(), SubsonicError> {
         self.request_action(&format!("unstar?id={}", urlencoding::encode(id)))
             .await
     }
 
     /// Create a new server-side playlist `name` containing `song_ids`, in order.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn create_playlist(
         &self,
         name: &str,
@@ -119,12 +160,80 @@ impl SubsonicClient {
     ) -> Result<(), SubsonicError> {
         let mut endpoint = format!("createPlaylist?name={}", urlencoding::encode(name));
         for id in song_ids {
-            endpoint.push_str(&format!("&songId={}", urlencoding::encode(id)));
+            let _ = write!(endpoint, "&songId={}", urlencoding::encode(id));
         }
         self.request_action(&endpoint).await
     }
 
-    /// List the OpenSubsonic extensions the server advertises, by name.
+    /// Rename the playlist `id` to `name`.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
+    pub async fn rename_playlist(&self, id: &str, name: &str) -> Result<(), SubsonicError> {
+        let endpoint = format!(
+            "updatePlaylist?playlistId={}&name={}",
+            urlencoding::encode(id),
+            urlencoding::encode(name)
+        );
+        self.request_action(&endpoint).await
+    }
+
+    /// Delete the playlist `id`.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
+    pub async fn delete_playlist(&self, id: &str) -> Result<(), SubsonicError> {
+        let endpoint = format!("deletePlaylist?id={}", urlencoding::encode(id));
+        self.request_action(&endpoint).await
+    }
+
+    /// Append `song_id` to the end of playlist `id`.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
+    pub async fn playlist_add_song(&self, id: &str, song_id: &str) -> Result<(), SubsonicError> {
+        let endpoint = format!(
+            "updatePlaylist?playlistId={}&songIdToAdd={}",
+            urlencoding::encode(id),
+            urlencoding::encode(song_id)
+        );
+        self.request_action(&endpoint).await
+    }
+
+    /// Remove the song at zero-based `index` from playlist `id`.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
+    pub async fn playlist_remove_index(&self, id: &str, index: usize) -> Result<(), SubsonicError> {
+        let endpoint = format!(
+            "updatePlaylist?playlistId={}&songIndexToRemove={index}",
+            urlencoding::encode(id)
+        );
+        self.request_action(&endpoint).await
+    }
+
+    /// Replace the entire song list of playlist `id` with `song_ids`, in order.
+    /// `createPlaylist` with a `playlistId` overwrites the contents (verified
+    /// against Navidrome), so this is the primitive for reordering.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
+    pub async fn set_playlist_songs(
+        &self,
+        id: &str,
+        song_ids: &[String],
+    ) -> Result<(), SubsonicError> {
+        let mut endpoint = format!("createPlaylist?playlistId={}", urlencoding::encode(id));
+        for sid in song_ids {
+            let _ = write!(endpoint, "&songId={}", urlencoding::encode(sid));
+        }
+        self.request_action(&endpoint).await
+    }
+
+    /// List the `OpenSubsonic` extensions the server advertises, by name.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_open_subsonic_extensions(&self) -> Result<Vec<String>, SubsonicError> {
         let data: OpenSubsonicExtensionsData = self.request("getOpenSubsonicExtensions").await?;
         Ok(data.extensions.into_iter().map(|e| e.name).collect())
@@ -132,6 +241,9 @@ impl SubsonicClient {
 
     /// Classic Subsonic scrobble. `submission=false` is now-playing only;
     /// `submission=true` records a played track. `time_ms` backdates the play.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn scrobble(
         &self,
         id: &str,
@@ -143,13 +255,16 @@ impl SubsonicClient {
             urlencoding::encode(id),
         );
         if let Some(t) = time_ms {
-            endpoint.push_str(&format!("&time={t}"));
+            let _ = write!(endpoint, "&time={t}");
         }
         self.request_action(&endpoint).await
     }
 
-    /// OpenSubsonic `reportPlayback` (extension `playbackReport`). Reports a
+    /// `OpenSubsonic` `reportPlayback` (extension `playbackReport`). Reports a
     /// playback-timeline state; the server owns the scrobble decision.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn report_playback(
         &self,
         media_id: &str,
@@ -178,7 +293,7 @@ impl SubsonicClient {
         let text = response.text().await?;
 
         let parsed: SubsonicResponse<T> = serde_json::from_str(&text)
-            .map_err(|e| SubsonicError::Parse(format!("Failed to parse response: {}", e)))?;
+            .map_err(|e| SubsonicError::Parse(format!("Failed to parse response: {e}")))?;
 
         let inner = parsed.subsonic_response;
 
@@ -201,6 +316,9 @@ impl SubsonicClient {
     }
 
     /// Probe connectivity and credentials via the `ping` endpoint.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn ping(&self) -> Result<(), SubsonicError> {
         let url = self.build_url("ping")?;
         debug!("Pinging server");
@@ -209,7 +327,7 @@ impl SubsonicClient {
         let text = response.text().await?;
 
         let parsed: SubsonicResponse<PingData> = serde_json::from_str(&text)
-            .map_err(|e| SubsonicError::Parse(format!("Failed to parse ping response: {}", e)))?;
+            .map_err(|e| SubsonicError::Parse(format!("Failed to parse ping response: {e}")))?;
 
         if parsed.subsonic_response.status != "ok" {
             if let Some(error) = parsed.subsonic_response.error {
@@ -225,6 +343,9 @@ impl SubsonicClient {
     }
 
     /// Fetch the account's starred songs.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_starred_songs(&self) -> Result<Vec<Child>, SubsonicError> {
         let data: StarredSongsData = self.request("getStarred2").await?;
         let songs = data.starred_songs.song;
@@ -233,9 +354,23 @@ impl SubsonicClient {
         Ok(songs)
     }
 
+    /// List the server's configured music folders (libraries).
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
+    pub async fn get_music_folders(&self) -> Result<Vec<MusicFolder>, SubsonicError> {
+        let data: MusicFoldersData = self.request("getMusicFolders").await?;
+        Ok(data.music_folders.music_folder)
+    }
+
     /// Fetch a batch of 500 random songs.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_random_songs(&self) -> Result<Vec<Child>, SubsonicError> {
-        let data: RandomSongsData = self.request("getRandomSongs?size=500").await?;
+        let data: RandomSongsData = self
+            .request(&self.with_folder("getRandomSongs?size=500".into()))
+            .await?;
         let songs = data.random_songs.song;
 
         debug!("Fetched {} songs", songs.len());
@@ -262,8 +397,17 @@ impl SubsonicClient {
     }
 
     /// Fetch the full artist index, flattened across index letters.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_artists(&self) -> Result<Vec<Artist>, SubsonicError> {
-        let data: ArtistsData = self.request("getArtists").await?;
+        let data: ArtistsData = match self.request(&self.with_folder("getArtists".into())).await {
+            Ok(d) => d,
+            // Navidrome answers an empty (or scoped-empty) library with error 70
+            // instead of an empty index; treat it as no artists, not a failure.
+            Err(SubsonicError::Api { code: 70, .. }) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
 
         let artists: Vec<Artist> = data
             .artists
@@ -288,9 +432,9 @@ impl SubsonicClient {
         offset: u32,
     ) -> Result<Vec<Album>, SubsonicError> {
         let data: AlbumList2Data = self
-            .request(&format!(
+            .request(&self.with_folder(format!(
                 "getAlbumList2?type={sort_type}&size={size}&offset={offset}"
-            ))
+            )))
             .await?;
         Ok(data.album_list2.album)
     }
@@ -308,9 +452,9 @@ impl SubsonicClient {
             let page = self
                 .get_album_list2("alphabeticalByName", PAGE, offset)
                 .await?;
-            let got = page.len() as u32;
+            let got = page.len();
             all.extend(page);
-            if got < PAGE {
+            if got < PAGE as usize {
                 break;
             }
             offset += PAGE;
@@ -320,15 +464,18 @@ impl SubsonicClient {
     }
 
     /// Fetch one artist and their albums.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_artist(&self, id: &str) -> Result<(Artist, Vec<Album>), SubsonicError> {
-        let url = self.build_url(&format!("getArtist?id={}", id))?;
+        let url = self.build_url(&format!("getArtist?id={id}"))?;
         debug!("Fetching artist: {}", id);
 
         let response = self.http.get(url).send().await?;
         let text = response.text().await?;
 
         let parsed: SubsonicResponse<ArtistData> = serde_json::from_str(&text)
-            .map_err(|e| SubsonicError::Parse(format!("Failed to parse artist response: {}", e)))?;
+            .map_err(|e| SubsonicError::Parse(format!("Failed to parse artist response: {e}")))?;
 
         if parsed.subsonic_response.status != "ok" {
             if let Some(error) = parsed.subsonic_response.error {
@@ -348,7 +495,7 @@ impl SubsonicClient {
         let artist = Artist {
             id: detail.id,
             name: detail.name.clone(),
-            album_count: Some(detail.album.len() as i32),
+            album_count: Some(crate::num::i32_sat(detail.album.len())),
             cover_art: None,
         };
 
@@ -361,15 +508,18 @@ impl SubsonicClient {
     }
 
     /// Fetch one album and its songs.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_album(&self, id: &str) -> Result<(Album, Vec<Child>), SubsonicError> {
-        let url = self.build_url(&format!("getAlbum?id={}", id))?;
+        let url = self.build_url(&format!("getAlbum?id={id}"))?;
         debug!("Fetching album: {}", id);
 
         let response = self.http.get(url).send().await?;
         let text = response.text().await?;
 
         let parsed: SubsonicResponse<AlbumData> = serde_json::from_str(&text)
-            .map_err(|e| SubsonicError::Parse(format!("Failed to parse album response: {}", e)))?;
+            .map_err(|e| SubsonicError::Parse(format!("Failed to parse album response: {e}")))?;
 
         if parsed.subsonic_response.status != "ok" {
             if let Some(error) = parsed.subsonic_response.error {
@@ -392,7 +542,7 @@ impl SubsonicClient {
             artist: detail.artist,
             artist_id: detail.artist_id,
             cover_art: None,
-            song_count: Some(detail.song.len() as i32),
+            song_count: Some(crate::num::i32_sat(detail.song.len())),
             duration: None,
             year: detail.year,
             original_release_date: None,
@@ -408,6 +558,9 @@ impl SubsonicClient {
     }
 
     /// Fetch all playlists visible to the account.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_playlists(&self) -> Result<Vec<Playlist>, SubsonicError> {
         let data: PlaylistsData = self.request("getPlaylists").await?;
         let playlists = data.playlists.playlist;
@@ -416,16 +569,18 @@ impl SubsonicClient {
     }
 
     /// Fetch one playlist and its songs.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_playlist(&self, id: &str) -> Result<(Playlist, Vec<Child>), SubsonicError> {
-        let url = self.build_url(&format!("getPlaylist?id={}", id))?;
+        let url = self.build_url(&format!("getPlaylist?id={id}"))?;
         debug!("Fetching playlist: {}", id);
 
         let response = self.http.get(url).send().await?;
         let text = response.text().await?;
 
-        let parsed: SubsonicResponse<PlaylistData> = serde_json::from_str(&text).map_err(|e| {
-            SubsonicError::Parse(format!("Failed to parse playlist response: {}", e))
-        })?;
+        let parsed: SubsonicResponse<PlaylistData> = serde_json::from_str(&text)
+            .map_err(|e| SubsonicError::Parse(format!("Failed to parse playlist response: {e}")))?;
 
         if parsed.subsonic_response.status != "ok" {
             if let Some(error) = parsed.subsonic_response.error {
@@ -462,6 +617,9 @@ impl SubsonicClient {
     }
 
     /// `size` is the longest-edge in pixels.
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub async fn get_cover_art(&self, id: &str, size: u32) -> Result<Vec<u8>, SubsonicError> {
         let mut url = self.base_url.join("rest/getCoverArt")?;
         let (salt, token) = generate_auth_params(&self.password);
@@ -477,7 +635,7 @@ impl SubsonicClient {
         let resp = self.http.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(SubsonicError::Api {
-                code: resp.status().as_u16() as i32,
+                code: i32::from(resp.status().as_u16()),
                 message: format!("getCoverArt HTTP {}", resp.status()),
             });
         }
@@ -499,6 +657,9 @@ impl SubsonicClient {
     /// assert!(url.contains("&t="));
     /// assert!(url.contains("&s="));
     /// ```
+    ///
+    /// # Errors
+    /// Returns a `SubsonicError` if the request fails or the response cannot be parsed.
     pub fn get_stream_url(&self, song_id: &str) -> Result<String, SubsonicError> {
         let mut url = self.base_url.join("rest/stream")?;
 

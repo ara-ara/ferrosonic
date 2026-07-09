@@ -2,10 +2,13 @@ use crossterm::event::{self, MouseButton, MouseEventKind};
 
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest, EnqueueMode, LayoutAreas, Page};
 
 impl App {
     /// Route one mouse event to header buttons or the active page.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the daemon request fails.
     pub async fn handle_mouse(&mut self, mouse: event::MouseEvent) -> Result<(), Error> {
         let x = mouse.column;
         let y = mouse.row;
@@ -18,6 +21,10 @@ impl App {
         }
     }
 
+    // Cohesive single match/render; splitting would fragment one logical unit.
+    #[allow(clippy::too_many_lines)]
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     async fn handle_mouse_click(&mut self, x: u16, y: u16) -> Result<(), Error> {
         use crate::ui::header::{Header, HeaderRegion};
 
@@ -32,7 +39,7 @@ impl App {
         let layout = state.client.layout.clone();
         let page = state.client.page;
         let duration = state.daemon.now_playing.duration;
-        drop(state);
+        let _ = state;
         drop(cs);
         drop(ds);
 
@@ -108,7 +115,7 @@ impl App {
                         + time_width
                         + 2;
                     if bar_width > 0 && rel_x >= bar_start && rel_x < bar_start + bar_width {
-                        let fraction = (rel_x - bar_start) as f64 / bar_width as f64;
+                        let fraction = f64::from(rel_x - bar_start) / f64::from(bar_width);
                         let seek_pos = fraction * duration;
                         let _ = self
                             .client
@@ -145,6 +152,8 @@ impl App {
         }
     }
 
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     async fn handle_quick_play_click(
         &mut self,
         x: u16,
@@ -152,9 +161,8 @@ impl App {
         layout: &LayoutAreas,
     ) -> Result<(), Error> {
         use crate::app::models::SongOption;
-        let (left, right) = match (layout.content_left, layout.content_right) {
-            (Some(l), Some(r)) => (l, r),
-            _ => return Ok(()),
+        let (Some(left), Some(right)) = (layout.content_left, layout.content_right) else {
+            return Ok(());
         };
 
         let in_pane = |r: ratatui::layout::Rect| {
@@ -220,7 +228,7 @@ impl App {
 
         if is_second_click {
             let songs = state.songs_list().to_vec();
-            drop(state);
+            let _ = state;
             drop(cs);
             drop(ds);
             self.last_click = Some((x, y, std::time::Instant::now()));
@@ -263,7 +271,7 @@ impl App {
                     .is_some_and(|(_, ly, t)| ly == y && t.elapsed().as_millis() < 500);
 
             if is_second_click {
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 self.last_click = Some((0, y, std::time::Instant::now()));
@@ -280,7 +288,9 @@ impl App {
         Ok(())
     }
 
-    async fn handle_mouse_scroll_up(&mut self) -> Result<(), Error> {
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
+    async fn handle_mouse_scroll_up(&self) -> Result<(), Error> {
         let ds = self.daemon_state.read().await;
         let mut cs = self.client_state.write().await;
         let state = AppState {
@@ -337,7 +347,9 @@ impl App {
         Ok(())
     }
 
-    async fn handle_mouse_scroll_down(&mut self) -> Result<(), Error> {
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
+    async fn handle_mouse_scroll_down(&self) -> Result<(), Error> {
         let ds = self.daemon_state.read().await;
         let mut cs = self.client_state.write().await;
         let state = AppState {

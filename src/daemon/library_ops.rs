@@ -23,7 +23,7 @@ impl DaemonCore {
                     return;
                 }
                 let mut state = self.state.write().await;
-                state.library.starred_songs = songs.clone();
+                state.library.starred_songs.clone_from(&songs);
                 state.library.rebuild_starred_index();
                 drop(state);
                 self.emit(DaemonEvent::StarredChanged(songs));
@@ -32,7 +32,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load starred songs: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load starred songs: {}", e),
+                    message: format!("Failed to load starred songs: {e}"),
                     is_error: true,
                 });
             }
@@ -52,7 +52,7 @@ impl DaemonCore {
                     return;
                 }
                 let mut state = self.state.write().await;
-                state.library.random_songs = songs.clone();
+                state.library.random_songs.clone_from(&songs);
                 drop(state);
                 self.emit(DaemonEvent::RandomChanged(songs));
                 self.bump_library_version();
@@ -60,7 +60,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load random songs: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load random songs: {}", e),
+                    message: format!("Failed to load random songs: {e}"),
                     is_error: true,
                 });
             }
@@ -109,7 +109,7 @@ impl DaemonCore {
                 }
                 let mut state = self.state.write().await;
                 let count = artists.len();
-                state.library.artists = artists.clone();
+                state.library.artists.clone_from(&artists);
                 drop(state);
                 info!("Loaded {} artists", count);
                 self.emit(DaemonEvent::ArtistsChanged(artists));
@@ -118,7 +118,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load artists: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load artists: {}", e),
+                    message: format!("Failed to load artists: {e}"),
                     is_error: true,
                 });
             }
@@ -139,7 +139,7 @@ impl DaemonCore {
                 }
                 let mut state = self.state.write().await;
                 let count = playlists.len();
-                state.library.playlists = playlists.clone();
+                state.library.playlists.clone_from(&playlists);
                 drop(state);
                 info!("Loaded {} playlists", count);
                 self.emit(DaemonEvent::PlaylistsChanged(playlists));
@@ -151,8 +151,85 @@ impl DaemonCore {
         }
     }
 
+    /// Re-fetch the server's music folders and broadcast the new list. On first
+    /// run (the user has not chosen a library), default to the server's first
+    /// (default) library rather than browsing all libraries.
+    pub async fn refresh_music_folders(self: &Arc<Self>) {
+        let Some(client) = self.subsonic.read().await.clone() else {
+            return;
+        };
+        let folders = match client.get_music_folders().await {
+            Ok(folders) => folders,
+            Err(e) => {
+                error!("Failed to load music folders: {}", e);
+                return;
+            }
+        };
+        let default_to = {
+            let mut state = self.state.write().await;
+            state.library.music_folders.clone_from(&folders);
+            if state.config.music_folder_chosen {
+                None
+            } else {
+                folders
+                    .first()
+                    .map(|f| f.id)
+                    .filter(|id| state.config.music_folder_id != Some(*id))
+            }
+        };
+        self.emit(DaemonEvent::MusicFoldersChanged(folders));
+        if let Some(id) = default_to {
+            let _ = self.apply_music_folder(Some(id), false).await;
+        }
+    }
+
+    /// Select the library to browse (`None` = all); persist, re-scope the live
+    /// client, and refetch the library so the UI reflects the new folder.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    pub async fn set_music_folder(self: &Arc<Self>, id: Option<i64>) -> Result<(), Error> {
+        self.apply_music_folder(id, true).await
+    }
+
+    /// Apply library `id` (`None` = all): persist, re-scope the live client, and
+    /// refetch the library. `user_chosen` records an explicit pick so the
+    /// first-run default no longer overrides it.
+    async fn apply_music_folder(
+        self: &Arc<Self>,
+        id: Option<i64>,
+        user_chosen: bool,
+    ) -> Result<(), Error> {
+        {
+            let mut state = self.state.write().await;
+            state.config.music_folder_id = id;
+            if user_chosen {
+                state.config.music_folder_chosen = true;
+            }
+            state.config.save_default().map_err(Error::Config)?;
+            state.library.all_albums.clear();
+        }
+        {
+            // Bump gen under the subsonic lock so any refresh in flight with the
+            // previous folder is discarded by its config_gen_changed guard.
+            let mut slot = self.subsonic.write().await;
+            self.config_gen
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            if let Some(client) = slot.as_mut() {
+                client.set_music_folder(id);
+            }
+        }
+        self.emit_config_changed().await;
+        self.refresh_artists().await;
+        self.refresh_random().await;
+        Ok(())
+    }
+
     /// Create playlist `name` from `song_ids`, then refresh so the new playlist
     /// lands in `state.library.playlists` and a `PlaylistsChanged` event fires.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
     pub async fn create_playlist(
         self: &Arc<Self>,
         name: &str,
@@ -172,7 +249,107 @@ impl DaemonCore {
         Ok(())
     }
 
+    /// The configured Subsonic client, or a not-configured error.
+    async fn subsonic_client(&self) -> Result<crate::subsonic::SubsonicClient, Error> {
+        self.subsonic.read().await.clone().ok_or_else(|| {
+            Error::Subsonic(crate::error::SubsonicError::Api {
+                code: 0,
+                message: "Subsonic client not configured".to_string(),
+            })
+        })
+    }
+
+    /// Rename playlist `id` to `name`, then refresh so `PlaylistsChanged` fires.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    pub async fn rename_playlist(self: &Arc<Self>, id: &str, name: &str) -> Result<(), Error> {
+        self.subsonic_client()
+            .await?
+            .rename_playlist(id, name)
+            .await
+            .map_err(Error::Subsonic)?;
+        self.refresh_playlists().await;
+        Ok(())
+    }
+
+    /// Delete playlist `id`, then refresh so `PlaylistsChanged` fires.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    pub async fn delete_playlist(self: &Arc<Self>, id: &str) -> Result<(), Error> {
+        self.subsonic_client()
+            .await?
+            .delete_playlist(id)
+            .await
+            .map_err(Error::Subsonic)?;
+        self.refresh_playlists().await;
+        Ok(())
+    }
+
+    /// Append `song_id` to playlist `playlist_id`; returns the refreshed songs.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    pub async fn playlist_add_song(
+        self: &Arc<Self>,
+        playlist_id: &str,
+        song_id: &str,
+    ) -> Result<Vec<crate::subsonic::models::Child>, Error> {
+        self.subsonic_client()
+            .await?
+            .playlist_add_song(playlist_id, song_id)
+            .await
+            .map_err(Error::Subsonic)?;
+        let songs = self.load_playlist_songs(playlist_id).await;
+        self.refresh_playlists().await;
+        Ok(songs)
+    }
+
+    /// Remove the song at `index` from playlist `playlist_id`; returns the refreshed songs.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    pub async fn playlist_remove_song(
+        self: &Arc<Self>,
+        playlist_id: &str,
+        index: usize,
+    ) -> Result<Vec<crate::subsonic::models::Child>, Error> {
+        self.subsonic_client()
+            .await?
+            .playlist_remove_index(playlist_id, index)
+            .await
+            .map_err(Error::Subsonic)?;
+        let songs = self.load_playlist_songs(playlist_id).await;
+        self.refresh_playlists().await;
+        Ok(songs)
+    }
+
+    /// Replace playlist `playlist_id`'s songs with `song_ids`, in order; returns the refreshed songs.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    pub async fn playlist_reorder(
+        self: &Arc<Self>,
+        playlist_id: &str,
+        song_ids: &[String],
+    ) -> Result<Vec<crate::subsonic::models::Child>, Error> {
+        self.subsonic_client()
+            .await?
+            .set_playlist_songs(playlist_id, song_ids)
+            .await
+            .map_err(Error::Subsonic)?;
+        let songs = self.load_playlist_songs(playlist_id).await;
+        self.refresh_playlists().await;
+        Ok(songs)
+    }
+
     /// Star or unstar `song_id`; returns the new starred state.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the server request fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn toggle_star_song(self: &Arc<Self>, song_id: &str) -> Result<bool, Error> {
         let Some(client) = self.subsonic.read().await.clone() else {
             return Err(Error::Subsonic(crate::error::SubsonicError::Api {
@@ -209,13 +386,13 @@ impl DaemonCore {
                 None
             }
         };
-        let stale = self.config_gen_changed(gen_at_start);
+        let is_stale = self.config_gen_changed(gen_at_start);
 
         let new_list = {
             let mut state = self.state.write().await;
             if let Some(list) = refreshed.as_ref() {
-                if !stale {
-                    state.library.starred_songs = list.clone();
+                if !is_stale {
+                    state.library.starred_songs.clone_from(list);
                     state.library.rebuild_starred_index();
                 }
             }
@@ -225,7 +402,7 @@ impl DaemonCore {
             id: song_id.to_string(),
             starred: new_starred,
         });
-        if refreshed.is_some() && !stale {
+        if refreshed.is_some() && !is_stale {
             self.emit(DaemonEvent::StarredChanged(new_list));
             self.bump_library_version();
         }
@@ -261,7 +438,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load albums: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load albums: {}", e),
+                    message: format!("Failed to load albums: {e}"),
                     is_error: true,
                 });
             }
@@ -277,7 +454,7 @@ impl DaemonCore {
         match client.get_all_albums().await {
             Ok(albums) => {
                 let mut state = self.state.write().await;
-                state.library.all_albums = albums.clone();
+                state.library.all_albums.clone_from(&albums);
                 drop(state);
                 info!("Loaded {} albums (flat list)", albums.len());
                 albums
@@ -285,7 +462,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load album list: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load albums: {}", e),
+                    message: format!("Failed to load albums: {e}"),
                     is_error: true,
                 });
                 Vec::new()
@@ -317,27 +494,27 @@ fn apply_star_to_cached(daemon: &mut DaemonState, song_id: &str, starred: bool) 
     for list in lists {
         for song in list.iter_mut() {
             if song.id == song_id {
-                song.starred = marker.clone();
+                song.starred.clone_from(&marker);
             }
         }
     }
     for list in daemon.library.album_songs_cache.values_mut() {
         for song in list.iter_mut() {
             if song.id == song_id {
-                song.starred = marker.clone();
+                song.starred.clone_from(&marker);
             }
         }
     }
     for list in daemon.library.playlist_songs_cache.values_mut() {
         for song in list.iter_mut() {
             if song.id == song_id {
-                song.starred = marker.clone();
+                song.starred.clone_from(&marker);
             }
         }
     }
     if let Some(np) = daemon.now_playing.song.as_mut() {
         if np.id == song_id {
-            np.starred = marker.clone();
+            np.starred.clone_from(&marker);
         }
     }
     sync_starred_songs(daemon, song_id, starred, marker);
@@ -352,7 +529,13 @@ fn sync_starred_songs(
     if starred {
         daemon.library.starred_ids.insert(song_id.to_string());
         let already = daemon.library.starred_songs.iter().any(|s| s.id == song_id);
-        if !already {
+        if already {
+            for s in &mut daemon.library.starred_songs {
+                if s.id == song_id {
+                    s.starred.clone_from(&marker);
+                }
+            }
+        } else {
             let source = daemon
                 .queue
                 .iter()
@@ -364,12 +547,6 @@ fn sync_starred_songs(
             if let Some(mut s) = source {
                 s.starred = marker;
                 daemon.library.starred_songs.push(s);
-            }
-        } else {
-            for s in daemon.library.starred_songs.iter_mut() {
-                if s.id == song_id {
-                    s.starred = marker.clone();
-                }
             }
         }
     } else {

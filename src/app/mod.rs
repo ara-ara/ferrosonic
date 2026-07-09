@@ -62,12 +62,15 @@ pub struct App {
     /// removes it on drop / `stop_cava`.
     pub(crate) cava_config: Option<tempfile::NamedTempFile>,
     pub(crate) last_click: Option<(u16, u16, std::time::Instant)>,
-    /// Guard must never span an .await; clippy::await_holding_lock enforces.
+    /// Guard must never span an .await; `clippy::await_holding_lock` enforces.
     pub(crate) cover_art: std::sync::Arc<std::sync::Mutex<crate::ui::cover_art::CoverArtState>>,
 }
 
 impl App {
     /// Standalone-mode constructor: daemon core runs in-process.
+    #[must_use]
+    // By-value ownership-transfer constructor; config is the owned input.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(config: Config) -> Self {
         let daemon_state = new_shared_daemon_state_with_restored_queue(config.clone());
         let client_state = new_shared_client_state(&config);
@@ -100,6 +103,8 @@ impl App {
 
     /// Split-build constructor. `state.daemon` is a mirror populated
     /// from `DaemonRequest::Snapshot` and the event pump.
+    // By-value ownership-transfer constructor; config is the owned input.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn with_remote_client(client: Arc<dyn DaemonClient>, config: Config) -> Self {
         let daemon_state = new_shared_daemon_state(config.clone());
         let client_state = new_shared_client_state(&config);
@@ -147,15 +152,14 @@ impl App {
         cs.settings_state.set_theme_by_name(&theme_name);
     }
 
-    /// Test seam: check if cava binary is on PATH, update client_state.
+    /// Test seam: check if cava binary is on PATH, update `client_state`.
     pub async fn probe_cava_available(&self) {
         let cava_available = std::process::Command::new("which")
             .arg("cava")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_ok_and(|s| s.success());
         let mut cs = self.client_state.write().await;
         cs.cava_available = cava_available;
         if !cava_available {
@@ -164,12 +168,14 @@ impl App {
     }
 
     /// Test seam: start mpv inside the daemon core, notify on error.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn start_mpv_with_notification(&self) {
         if let Some(ref core) = self.core {
             if let Err(e) = core.start_mpv().await {
                 warn!("Failed to start MPV: {} - audio playback won't work", e);
                 let mut cs = self.client_state.write().await;
-                cs.notify_error(format!("Failed to start MPV: {}. Is mpv installed?", e));
+                cs.notify_error(format!("Failed to start MPV: {e}. Is mpv installed?"));
             } else {
                 info!("MPV started successfully, ready for playback");
             }
@@ -177,12 +183,18 @@ impl App {
     }
 
     /// Run the TUI event loop until quit.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the daemon request fails.
     pub async fn run(&mut self) -> Result<(), Error> {
         // A remote daemon (core == None) outlives the TUI; gate the quit prompt.
         self.client_state.write().await.daemon_backed = self.core.is_none();
         self.spawn_signal_quit();
         let _term_guard = TerminalGuard::new_crossterm();
-        let _poll_task = self.core.as_ref().map(|c| c.spawn_polling_task());
+        let _poll_task = self
+            .core
+            .as_ref()
+            .map(super::daemon::core::DaemonCore::spawn_polling_task);
 
         self.start_mpv_with_notification().await;
 
@@ -219,7 +231,7 @@ impl App {
                 let td = cs.settings_state.current_theme();
                 let g = td.cava_gradient.clone();
                 let h = td.cava_horizontal_gradient.clone();
-                let size = cs.settings_state.cava_size as u32;
+                let size = u32::from(cs.settings_state.cava_size);
                 drop(cs);
                 self.start_cava(&g, &h, size);
             }
@@ -236,7 +248,10 @@ impl App {
 
         {
             let probed = crate::ui::cover_art::CoverArtState::init();
-            let mut guard = self.cover_art.lock().unwrap_or_else(|p| p.into_inner());
+            let mut guard = self
+                .cover_art
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = probed;
         }
 
@@ -331,7 +346,10 @@ impl App {
             .await
         {
             if !bytes.is_empty() {
-                let mut guard = self.cover_art.lock().unwrap_or_else(|p| p.into_inner());
+                let mut guard = self
+                    .cover_art
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 guard.load(id, &bytes);
             }
         }
@@ -356,7 +374,7 @@ impl App {
         };
 
         if let Some(snap) = snap {
-            let (queue, queue_position) = {
+            let (queue, queue_position, mpv_version) = {
                 let mut ds = self.daemon_state.write().await;
                 *ds = *snap;
                 info!(
@@ -366,8 +384,17 @@ impl App {
                     ds.library.artists.len(),
                     ds.library.playlists.len(),
                 );
-                (ds.queue.clone(), ds.queue_position)
+                (ds.queue.clone(), ds.queue_position, ds.mpv_version)
             };
+            // Advise once if the daemon's mpv predates the 0.38 loadfile
+            // contract; playback runs in a compatibility path below it.
+            if let Some((maj, min)) = mpv_version {
+                if (maj, min) < (0, 38) {
+                    self.client_state.write().await.notify(format!(
+                        "mpv {maj}.{min} detected. ferrosonic targets mpv 0.38+; older versions run in compatibility mode and full playback behavior is not guaranteed."
+                    ));
+                }
+            }
             // Reopening mid-playback: default the Library right pane to the
             // playing album instead of leaving it blank until an album hover.
             if queue_position.is_some() {
@@ -382,10 +409,12 @@ impl App {
         let client = self.client.clone();
         let cover_art = self.cover_art.clone();
         tokio::spawn(async move {
-            event_pump::run_event_pump(client, daemon_state, client_state, cover_art, rx).await
+            event_pump::run_event_pump(client, daemon_state, client_state, cover_art, rx).await;
         });
     }
 
+    // Recv outcomes kept explicit; merging the two break arms would cross the Ok/Err boundary.
+    #[allow(clippy::match_same_arms)]
     fn spawn_mpris_pump(&self, server: mpris_server::Server<crate::mpris::server::MprisPlayer>) {
         use crate::ipc::DaemonEvent;
         let mut rx = self.client.subscribe();
@@ -394,13 +423,12 @@ impl App {
             let server = server;
             loop {
                 match rx.recv().await {
-                    Ok(DaemonEvent::NowPlayingChanged(_))
-                    | Ok(DaemonEvent::QueueChanged { .. }) => {
+                    Ok(DaemonEvent::NowPlayingChanged(_) | DaemonEvent::QueueChanged { .. }) => {
                         let _ = update_mpris_properties(&server, &daemon_state).await;
                     }
                     Ok(DaemonEvent::Shutdown) => break,
                     Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -426,7 +454,10 @@ impl App {
         self.run_with_source(terminal, &mut source).await
     }
 
-    /// Generic loop: any Backend + any EventSource. Tests use TestBackend + ChannelEventSource.
+    /// Generic loop: any Backend + any `EventSource`. Tests use `TestBackend` + `ChannelEventSource`.
+    ///
+    /// # Errors
+    /// Returns an `Error` if the daemon request fails.
     pub async fn run_with_source<B, E>(
         &mut self,
         terminal: &mut Terminal<B>,
@@ -458,7 +489,7 @@ impl App {
         Ok(())
     }
 
-    fn tick_rate(&self) -> Duration {
+    const fn tick_rate(&self) -> Duration {
         if self.cava_parser.is_some() {
             Duration::from_millis(16)
         } else {
@@ -466,8 +497,13 @@ impl App {
         }
     }
 
-    /// Test seam: render one frame into any Backend (TestBackend in
-    /// tests, CrosstermBackend in production).
+    /// Test seam: render one frame into any Backend (`TestBackend` in
+    /// tests, `CrosstermBackend` in production).
+    ///
+    /// # Errors
+    /// Returns an `Error` if the daemon request fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn draw_once<B: ratatui::backend::Backend>(
         &mut self,
         terminal: &mut Terminal<B>,

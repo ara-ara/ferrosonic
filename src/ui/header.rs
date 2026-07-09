@@ -21,7 +21,12 @@ pub struct Header {
 
 impl Header {
     /// Header for the current page and playback state.
-    pub fn new(current_page: Page, playback_state: PlaybackState, colors: ThemeColors) -> Self {
+    #[must_use]
+    pub const fn new(
+        current_page: Page,
+        playback_state: PlaybackState,
+        colors: ThemeColors,
+    ) -> Self {
         Self {
             current_page,
             playback_state,
@@ -114,6 +119,7 @@ pub enum HeaderRegion {
 
 impl Header {
     /// Map a click position to its header region, if any.
+    #[must_use]
     pub fn region_at(area: Rect, x: u16, _y: u16) -> Option<HeaderRegion> {
         let chunks = Layout::horizontal([Constraint::Min(40), Constraint::Length(30)]).split(area);
 
@@ -134,7 +140,7 @@ impl Header {
             let mut cursor: u16 = 0;
             for (i, page) in pages.iter().enumerate() {
                 let label = format!("{} {}", page.shortcut(), page.label());
-                let tab_width = padding + label.len() as u16 + padding;
+                let tab_width = padding + crate::num::u16_sat(label.len()) + padding;
                 if rel_x >= cursor && rel_x < cursor + tab_width {
                     return Some(HeaderRegion::Tab(*page));
                 }

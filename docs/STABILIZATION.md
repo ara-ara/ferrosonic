@@ -39,23 +39,19 @@ authoritative current status.
   - done, alt mechanism: task-outlives-shutdown leak solved by `shutdown: AtomicBool` + `shutdown_signal()` checked every spawn loop (`core.rs:173,574`; `CLAUDE.md` rule 3), NOT the `CancellationToken` this plan named. Subprocess orphans (mpv/cava) solved by `PR_SET_PDEATHSIG(SIGKILL)` + `Drop` kill (`1c88f0a`, `d38a75a`).
   - open/low-value: cava raw-FD RAII guard (`cava_pipe.rs` still `from_raw_fd` without a guard); mpv reader single-line framing (works in practice: mpv emits one JSON per line; parser is fuzz-guarded); `queue.json` 0o600 (now in the config dir not `/tmp`, so low severity; song ids are not secrets).
   - false-positive: mpv `send_command` multi-lock on `pending` is safe; request ids are unique (`AtomicU64`), so no wrong-oneshot demux. No fix.
-- **P8 MEDIUM/LOW TRIAGE** NOT done as a formal pass. No `KNOWN-ISSUES.md`. Residue = the 847-warning pedantic/nursery clippy backlog.
-- **P9 CI GATES** PARTIAL.
-  - done: `test.yml` + `release.yml` exist; `deny.toml` (cargo-deny); nightly cron.
-  - open: CI triggers are `workflow_dispatch` + cron only, NOT push/PR (`test.yml:6-8`); clippy `unwrap_used`/`expect_used` still `warn` not `deny` (`Cargo.toml:147-148`; `CLAUDE.md` rule 2 treats as deny manually + a CI grep backstop).
-- **P10 RELEASE** not started.
+- **P8 MEDIUM/LOW TRIAGE** DONE. `docs/KNOWN-ISSUES.md` now exists (accepted/deferred items). The pedantic/nursery clippy backlog was cleared to **0** on lib+bins (2026-06-22 de-silencing pass: real fixes + per-site allows, zero global silences; see KNOWN-ISSUES build-hygiene).
+- **P9 CI GATES** DONE.
+  - `test.yml` gates on every push to `master` and on PRs (`on: push/pull_request`); `release.yml` fires on tag push; `deny.toml` (cargo-deny); `unwrap_check` CI job denies `unwrap_used`/`expect_used` on lib+bins (machine-enforced, not just the grep backstop). Mutation testing stays local (`cargo mutants --file <path>`), not a CI gate: the full-crate scan never fit GitHub's 6h job ceiling even sharded, and per rule 8 it is a discovery tool, not a gate.
+  - residual nit (not a gap): the `[lints.clippy]` table still declares `unwrap_used`/`expect_used` as `warn` (the deny lives in the CI job, not the crate manifest).
+- **P10 RELEASE** DONE: 0.5.x then 0.6.0 shipped (tag-triggered `release.yml`, musl binary attached).
 
 ### New finding (not in the original audit)
 
-- **TEST-FIXTURE /tmp LEAK.** Tests call `tempfile::tempdir()` (135 call sites) producing `/tmp/.tmpXXXXXX/`. `TempDir`'s `Drop` is skipped on SIGKILL (nextest timeout, cargo-mutants group-kill, `panic=abort`), so the dirs survive. 9,594 present 2026-06-15, accumulating. The production mpv socket no longer leaks (fixed path, `paths.rs:27`). Fix = design choice (relocate test roots under a swept prefix vs janitor pass).
+- **TEST-FIXTURE /tmp LEAK: CLOSED 2026-06-22.** Integration tests route every temp dir through `common::tempdir()`, which creates under a `ferrosonic-test` swept root and runs `sweep_stale_test_dirs` (remove dirs >1h old) once per test process. So a SIGKILL'd run's leftovers are reaped by the next run's first `tempdir()` call: self-cleaning. The last two direct `tempfile::tempdir()` bypassers (`keychain_credentials.rs`) now use the helper. Residual, negligible: 4 doc-test examples + 1 `io_util` unit test still call `tempfile::tempdir()` directly (doc/unit scope cannot reach `tests/common`; each is one fast dir). The production mpv socket does not leak (fixed path, `paths.rs:27`).
 
 ### Worth doing, value-ranked
 
-1. **CI on push/PR** (P9). Nothing auto-gates regressions today. Low effort (edit `test.yml` triggers).
-2. **Test-fixture /tmp leak.** Active, accumulating. Fix needs a call (135 sites).
-3. **IPC per-connection idle timeout** (P4). Real: a hung client holds a writer task forever.
-4. **clippy `unwrap`/`expect` to deny** (P9). Closes the gap between `CLAUDE.md` rule 2 (manual) and machine enforcement. Blocked on triaging the 847 pedantic backlog OR scoping deny to just those two lints.
-5. **Release cut** (P10) once the above settle.
+All non-feature stabilization items are DONE: P8 KNOWN-ISSUES, P9 CI gates + clippy deny, P10 0.6.0 release, and the test-fixture /tmp leak (now self-cleaning via the swept `common::tempdir()` root). Remaining open work is feature requests (`#25` ReplayGain, `#14` star/ratings, `#12` random album + keybinds, `#7` playback filters) and the documented mutation depth-pass items below.
 
 ### Low-value / defer (localhost single-user IPC; defense-in-depth)
 

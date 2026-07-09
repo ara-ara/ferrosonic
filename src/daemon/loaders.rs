@@ -9,6 +9,8 @@ use crate::ipc::protocol::DaemonEvent;
 
 impl DaemonCore {
     /// Fetch an album's songs into the cache; empty Vec on failure.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn load_album_songs(
         self: &Arc<Self>,
         album_id: &str,
@@ -50,7 +52,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load album songs: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load album: {}", e),
+                    message: format!("Failed to load album: {e}"),
                     is_error: true,
                 });
                 Vec::new()
@@ -67,7 +69,7 @@ impl DaemonCore {
         song_count: u32,
     ) -> crate::subsonic::models::SearchResult3 {
         let Some(client) = self.subsonic.read().await.clone() else {
-            return Default::default();
+            return crate::subsonic::models::SearchResult3::default();
         };
         match client
             .search3(query, artist_count, album_count, song_count)
@@ -76,12 +78,14 @@ impl DaemonCore {
             Ok(r) => r,
             Err(e) => {
                 error!("search3 failed: {}", e);
-                Default::default()
+                crate::subsonic::models::SearchResult3::default()
             }
         }
     }
 
     /// Fetch a playlist's songs into the cache; empty Vec on failure.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn load_playlist_songs(
         self: &Arc<Self>,
         playlist_id: &str,
@@ -111,7 +115,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load playlist songs: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to load playlist: {}", e),
+                    message: format!("Failed to load playlist: {e}"),
                     is_error: true,
                 });
                 Vec::new()
@@ -121,7 +125,7 @@ impl DaemonCore {
 
     /// Returns empty on error so the caller renders no art.
     pub async fn get_cover_art(self: &Arc<Self>, id: &str, size: u32) -> Vec<u8> {
-        let key = format!("{}@{}", id, size);
+        let key = format!("{id}@{size}");
         {
             let mut cache = self.cover_art_cache.write().await;
             if let Some(bytes) = cache.get(&key) {

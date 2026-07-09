@@ -16,12 +16,13 @@ pub struct CavaWidget<'a> {
 
 impl<'a> CavaWidget<'a> {
     /// Widget over the latest parsed cava rows.
-    pub fn new(screen: &'a [CavaRow]) -> Self {
+    #[must_use]
+    pub const fn new(screen: &'a [CavaRow]) -> Self {
         Self { screen }
     }
 }
 
-fn cava_color_to_ratatui(c: CavaColor) -> Option<Color> {
+const fn cava_color_to_ratatui(c: CavaColor) -> Option<Color> {
     match c {
         CavaColor::Default => None,
         CavaColor::Indexed(i) => Some(Color::Indexed(i)),
@@ -39,7 +40,7 @@ impl Widget for CavaWidget<'_> {
             if row_idx >= area.height as usize {
                 break;
             }
-            let y = area.y + row_idx as u16;
+            let y = area.y + crate::num::u16_sat(row_idx);
             let mut x = area.x;
 
             for span in &cava_row.spans {

@@ -5,6 +5,7 @@
 use crate::subsonic::models::Child;
 
 /// Notification body: artist on the first line, album on the second.
+#[must_use]
 pub fn track_body(song: &Child) -> String {
     let artist = song.artist.as_deref().unwrap_or("Unknown Artist");
     match song.album.as_deref() {
@@ -36,6 +37,8 @@ mod linux {
         default_path = "/org/freedesktop/Notifications"
     )]
     trait Notifications {
+        // org.freedesktop.Notifications.Notify signature is fixed by the D-Bus spec.
+        #[allow(clippy::too_many_arguments)]
         fn notify(
             &self,
             app_name: &str,
@@ -59,9 +62,16 @@ mod linux {
         cover_file: Mutex<Option<NamedTempFile>>,
     }
 
+    impl Default for Notifier {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl Notifier {
         /// Construct an idle notifier; no D-Bus connection is made until the
         /// first notification is shown.
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 conn: OnceCell::new(),
@@ -87,6 +97,11 @@ mod linux {
         }
 
         async fn proxy(&self) -> Option<NotificationsProxy<'_>> {
+            // Test/headless guard: never touch the real session bus when set. The
+            // test harness sets it (tests/common) so the suite cannot spam the desktop.
+            if std::env::var_os("FERROSONIC_NO_DESKTOP_NOTIFY").is_some() {
+                return None;
+            }
             let conn = self
                 .conn
                 .get_or_init(|| async { Connection::session().await.ok() })
@@ -95,6 +110,9 @@ mod linux {
             NotificationsProxy::new(conn).await.ok()
         }
 
+        // cover_file lock intentionally spans the spawn_blocking write so concurrent
+        // cover writes to the shared tempfile path serialize; do not tighten.
+        #[allow(clippy::significant_drop_tightening)]
         async fn cover_uri(&self, bytes: &[u8]) -> Option<String> {
             let mut guard = self.cover_file.lock().await;
             if guard.is_none() {
@@ -127,7 +145,7 @@ mod linux {
                 None => None,
             };
             let uri_val = uri.as_deref().map(Value::from);
-            let mut hints: HashMap<&str, &Value> = HashMap::new();
+            let mut hints: HashMap<&str, &Value<'_>> = HashMap::new();
             if let Some(v) = &uri_val {
                 hints.insert("image-path", v);
             }

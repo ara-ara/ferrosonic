@@ -11,7 +11,8 @@ use crate::config::Config;
 use crate::subsonic::models::Child;
 
 pub use crate::app::page_state::{
-    ArtistsState, PlaylistsState, QueueState, ServerState, SettingsState, SongsState,
+    ArtistsState, PlaylistPicker, PlaylistsState, QueueState, ServerState, SettingsState,
+    SongsState,
 };
 
 /// Top-level TUI page selected via the header tabs.
@@ -34,38 +35,41 @@ pub enum Page {
 
 impl Page {
     /// Zero-based tab position in the header.
-    pub fn index(&self) -> usize {
+    #[must_use]
+    pub const fn index(&self) -> usize {
         match self {
-            Page::Library => 0,
-            Page::Queue => 1,
-            Page::QuickPlay => 2,
-            Page::Playlists => 3,
-            Page::Server => 4,
-            Page::Settings => 5,
+            Self::Library => 0,
+            Self::Queue => 1,
+            Self::QuickPlay => 2,
+            Self::Playlists => 3,
+            Self::Server => 4,
+            Self::Settings => 5,
         }
     }
 
     /// Tab caption shown in the header.
-    pub fn label(&self) -> &'static str {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
         match self {
-            Page::Library => "Library",
-            Page::Queue => "Queue",
-            Page::QuickPlay => "Quick Play",
-            Page::Playlists => "Playlists",
-            Page::Server => "Server",
-            Page::Settings => "Settings",
+            Self::Library => "Library",
+            Self::Queue => "Queue",
+            Self::QuickPlay => "Quick Play",
+            Self::Playlists => "Playlists",
+            Self::Server => "Server",
+            Self::Settings => "Settings",
         }
     }
 
     /// Function key bound to this page.
-    pub fn shortcut(&self) -> &'static str {
+    #[must_use]
+    pub const fn shortcut(&self) -> &'static str {
         match self {
-            Page::Library => "F1",
-            Page::Queue => "F2",
-            Page::QuickPlay => "F3",
-            Page::Playlists => "F4",
-            Page::Server => "F5",
-            Page::Settings => "F6",
+            Self::Library => "F1",
+            Self::Queue => "F2",
+            Self::QuickPlay => "F3",
+            Self::Playlists => "F4",
+            Self::Server => "F5",
+            Self::Settings => "F6",
         }
     }
 }
@@ -123,7 +127,7 @@ pub struct CavaSpan {
 }
 
 /// Terminal color parsed from cava's ANSI output.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CavaColor {
     /// Terminal default color.
     #[default]
@@ -134,13 +138,15 @@ pub enum CavaColor {
     Rgb(u8, u8, u8),
 }
 
-impl<'a> AppState<'a> {
+impl AppState<'_> {
     /// Song currently loaded in the daemon, if any.
+    #[must_use]
     pub fn current_song(&self) -> Option<&Child> {
         self.daemon.current_song()
     }
 
     /// Song list backing the Quick Play page's active selection.
+    #[must_use]
     pub fn songs_list(&self) -> &[Child] {
         match self.client.songs.selected_option {
             Some(SongOption::Random) | Some(SongOption::RandomAlbums) => &self.daemon.library.random_songs,
@@ -155,11 +161,12 @@ pub type SharedDaemonState = Arc<RwLock<crate::daemon::DaemonState>>;
 pub type SharedClientState = Arc<RwLock<crate::app::client_state::ClientState>>;
 
 /// Wrap a fresh `DaemonState` for sharing across tasks.
+#[must_use]
 pub fn new_shared_daemon_state(config: Config) -> SharedDaemonState {
     Arc::new(RwLock::new(crate::daemon::DaemonState::new(config)))
 }
 
-/// Daemon-only constructor: loads the persisted queue snapshot synchronously into the bare DaemonState before wrapping in Arc<RwLock>. Tests use new_shared_daemon_state to avoid reading the user's real ~/.config/ferrosonic/queue.json.
+/// Daemon-only constructor: loads the persisted queue snapshot synchronously into the bare `DaemonState` before wrapping in Arc<RwLock>. Tests use `new_shared_daemon_state` to avoid reading the user's real ~/.config/ferrosonic/queue.json.
 pub fn new_shared_daemon_state_with_restored_queue(config: Config) -> SharedDaemonState {
     let mut state = crate::daemon::DaemonState::new(config);
     if let Some(snap) = crate::daemon::persistence::QueueSnapshot::load() {
@@ -173,10 +180,11 @@ pub fn new_shared_daemon_state_with_restored_queue(config: Config) -> SharedDaem
 }
 
 /// Build the client UI state pre-seeded from the persisted config.
+#[must_use]
 pub fn new_shared_client_state(config: &Config) -> SharedClientState {
     let mut client = crate::app::client_state::ClientState::default();
-    client.server_state.base_url = config.base_url.clone();
-    client.server_state.username = config.username.clone();
+    client.server_state.base_url.clone_from(&config.base_url);
+    client.server_state.username.clone_from(&config.username);
     client.server_state.password = config.password.clone();
     client.settings_state.cava_enabled = config.cava;
     client.settings_state.cava_size = config.cava_size.clamp(10, 80);

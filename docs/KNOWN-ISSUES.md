@@ -1,7 +1,7 @@
 ---
 description: Accepted and deferred items for ferrosonic - low-value stabilization tail, cargo-deny advisory ignores, clippy backlog, CI carve-outs, mutation known-open seams. Read before re-filing one of these as a bug.
 tags: [known-issues, stabilization, deferred, security]
-date: 2026-06-15
+date: 2026-06-22
 ---
 
 # KNOWN ISSUES (accepted / deferred)
@@ -32,20 +32,43 @@ scope = localhost single-user Unix socket; the threat model these guard against 
 - RUSTSEC-2026-0097 `rand` 0.9 unsound: dev-only (proptest); shipped binary uses rand 0.8 and no custom `rand::rng()` logger. not reachable.
 - duplicate-version warnings (`base64`, `hashbrown`, `thiserror` 1+2, etc.): `multiple-versions = "warn"`, transitive, non-gating. accepted.
 
-## build hygiene (intentional backlog)
+## build hygiene (clippy backlog)
 
-- clippy pedantic + nursery: ~847 warnings at the crate root (`#![warn(pedantic, nursery, missing_docs)]`). INTENTIONAL triage backlog per `CLAUDE.md` rule 0, NOT noise to bulk-silence. the gating clippy job compiles (no `-D`); `unwrap_used`/`expect_used` ARE denied on lib+bins (`unwrap_check` CI job). quiet selectively only when a suggestion is genuinely wrong.
+clippy pedantic + nursery at the crate root (`#![warn(pedantic, nursery, missing_docs)]`). 2026-06-22 cleanup took lib+bins 897 -> **0**. gating clippy job compiles (no `-D`); `unwrap_used`/`expect_used` denied on lib+bins (`unwrap_check` CI job).
+
+NO GLOBAL SILENCES. `src/lib.rs` carries only `#![warn(...)]` (zero crate `#![allow]`); `Cargo.toml [lints.clippy]` has no `allow`; `clippy.toml` has no `too-many-lines-threshold` override (default 100). Every former warning is a real fix or a per-site inline `#[allow]` with a one-line rationale at the marker. A future regression of any lint surfaces again instead of passing silently.
+
+FIXED (not suppressed): `missing_errors_doc` (114); `uninlined_format_args` (446); input handlers -> `&self` (12 fns); `assigning_clones` -> `clone_from` (24); unused imports; `manual_let_else` (10); `drop_non_drop` (72, `drop(state)` -> `let _ = state`); int->int narrowing casts -> saturating `try_from` helpers in `src/num.rs`; list-index math -> `usize::checked_add_signed`; `option_if_let_else` (9 of 17) -> `map_or`/`map_or_else`; `large_enum_variant` (3, `NowPlaying` boxed at `DaemonEvent::NowPlayingChanged`); `format_push_string` (3, `write!`); `too_long_first_doc_paragraph` (6); `disallowed_methods` (theme seed -> `io_util::atomic_write_bytes`); `significant_drop_in_scrutinee`; `len_without_is_empty`/`new_without_default` (+impls); `ref_option_ref` (dropped `serialize_with` for a `RevealedSecret` newtype); plus `explicit_counter_loop`, `manual_clamp`, `items_after_statements`, `unreadable_literal`, `similar_names` (stale->is_stale), `match_same_arms` (1, merged `mpv is_running` duplicate arms).
+
+`significant_drop_tightening` (79): every guard is a `tokio` lock (`await_holding_lock = deny` already covers the std mutexes; tokio guards are allowed to span an await, so the lint must be judged per site, not assumed sync-only). A per-site compile-and-await gate split them: a handful of free-standing guards whose early `drop()` both compiles and adds no cross-await risk got the drop (`stamp_loadfile`, `playback_tick`, `socket_client`, `mpris`); the rest carry a per-fn allow whose reason states why tightening is unsafe - borrow-blocked (early-drop fails to compile), spans a trailing await (a tokio early-drop there changes cross-await behavior, e.g. the `notify` cover-write serialization), or saves nothing before return. `notify::cover_uri` keeps its `cover_file` lock across the `spawn_blocking` write deliberately, with an allow.
+
+SUPPRESSED per-site (inline `#[allow]` + rationale at each marker, no global allow):
+- float->int casts (`as` saturating since Rust 1.45); `frame.rs` length prefix (guarded `<= MAX_FRAME_BYTES`); `chafa_ext::argb_to_color` (const fn, masked `& 0xff`).
+- `option_if_let_else` (8 of 17): side-effecting arms / nested `map_or_else` / parser-iterator state / label fallback.
+- `struct_excessive_bools` (5): orthogonal-flag structs, not state machines.
+- `match_same_arms` (3 fn-scoped): arms kept explicit per enum-variant / recv-outcome / setting.
+- `too_many_lines` (cohesive dispatchers/renders): the four former >250 split-candidates are addressed. `apply_event` split into per-event helpers (allow removed); `InProcessClient::request` flattened to one-liner arms via an `ok_response` helper + four extracted method bodies (deliberately-flat ~50-command router keeps one allow); `handle_library_key` + `handle_playlists_key` route their modal overlays to focused sub-handlers (the cohesive tree/song key-match keeps one allow each).
+- `needless_pass_by_value` (by-value constructors + a `map_err` fn-item); `too_many_arguments` (freedesktop `Notify` D-Bus signature); `implicit_hasher`/`map_entry` (transitional shim); `float_cmp` (exact integer-value test); `significant_drop_tightening` (36 fns, above).
+
+TEST TREE: 6 dead `zombie_processes` crate-allows removed; `sigterm_graceful_exit` keeps a per-fn allow (child reaped on all paths, clippy can't prove it through the loop); `cava_drain` `ReadEnd::Eof` now exercised (was dead); `tests/common` keeps a module `#![allow(dead_code, unused_imports)]` (shared-harness idiom, structural). Warn-level `unwrap`/`expect`/`panic` in tests are accepted (gate is lib+bins only).
+
+DEFERRED: none. backlog cleared.
 
 ## CI carve-outs
 
 - coverage job = report-only, best-effort: nextest `coverage` profile (`.config/nextest.toml`) drops the 11 real-binary e2e test files (they exec a separate process -> no in-process coverage, and the instrumented child races profile-write vs signal-exit); collect step is `continue-on-error`. coverage is not a gate.
 - subprocess/PTY tests flaky under parallel CI: the gating nextest job runs the `ci` profile (`retries=2`) so a known-flaky timing test retries instead of reddening the gate. a real break still fails all attempts.
 
-## mutation known-open seams (deferred depth pass)
+## mutation known-open seams
 
-real (behaviour-changing) survivors that need a test seam not yet built; NOT provably-equivalent (those live in [mutants_exclusions](mutants_exclusions.md)). detail in [TESTING](TESTING.md) CURRENT section.
+real (behaviour-changing) survivors; NOT provably-equivalent (those live in [mutants_exclusions](mutants_exclusions.md)). detail in [TESTING](TESTING.md) CURRENT section.
 
-- `core.rs` RAII guards (LoadingFlagOwner/PrebufferGate/CancelSlotCleaner disarm+drop): track-switch cancel race; needs a concurrent rapid-switch harness (loom or staged Buffered plays).
-- `core.rs` mpv EOF event listener (`reason != "eof"`, `count >= 2`): gapless auto-advance gating; needs a FakeMpv unsolicited-event injection seam.
-- `core.rs` prebuffer streaming thresholds: perf-timing, loads the same song; low correctness value.
-- `playback_tick.rs` 1500ms / 5s debounce boundaries: `std::time::Instant`, tokio fake-time can't reach; needs a clock-injection seam.
+CLOSED 2026-06-22:
+- `core.rs` mpv EOF event listener (`reason != "eof"`, `count >= 2`): `FakeMpv::emit_end_file` injection seam + `tests/mpv_eof_advance.rs`. Mutant-verified (the `!=`-flip and the `>= 2` boundary both fail the tests).
+- `playback_tick.rs` 1500ms / 5s debounce boundaries: extracted to pure `within_just_loaded_window` / `preload_due` (parameterized on `now`); boundary tests in the `boundary_tests` module. Mutant-verified (`<`->`<=`, `>=`->`>` both fail).
+
+CLOSED 2026-06-22 (RAII guards):
+- `core.rs` LoadingFlagOwner / PrebufferGate / CancelSlotCleaner (disarm + Drop): deterministic unit tests in `core::guard_tests` cover every guard's armed and disarmed Drop. Mutant-verified: the two `disarm` no-ops, the `armed`-check removal, and `Arc::ptr_eq`->`true` all fail a test. `CancelSlotCleaner` was refactored to depend on a `CancelSlot` (the slot `Arc<Mutex<..>>`) instead of the whole core, so it is unit-testable. The integration supersession race stays covered by `tests/buffered_playback.rs::rapid_buffered_switches_only_load_latest_track`. The `disarm()` CALL-sites in `prebuffer_and_load` are provably equivalent (per-task Arc + ptr_eq); see [mutants_exclusions](mutants_exclusions.md).
+
+OPEN:
+- `core.rs` prebuffer streaming thresholds: perf-timing, loads the same song; low correctness value, left alone.

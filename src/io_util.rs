@@ -5,9 +5,11 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// Remove files in the system temp dir matching `<prefix>...<suffix>` older
-/// than `max_age`. Backstop for temp files leaked when the owning process was
-/// SIGKILLed before its Drop-based cleanup ran; the age gate avoids deleting a
-/// live instance's files.
+/// than `max_age`.
+///
+/// Backstop for temp files leaked when the owning process was `SIGKILLed`
+/// before its Drop-based cleanup ran; the age gate avoids deleting a live
+/// instance's files.
 pub fn sweep_stale_tmp_files(prefix: &str, suffix: &str, max_age: Duration) {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return;
@@ -35,7 +37,7 @@ pub fn sweep_stale_tmp_files(prefix: &str, suffix: &str, max_age: Duration) {
 pub(crate) trait FileSystem {
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn path_exists(&self, path: &Path) -> bool;
-    fn write_then_sync(&self, path: &Path, body: &[u8]) -> io::Result<()>;
+    fn write_then_sync(&self, path: &Path, body: &[u8], mode: Option<u32>) -> io::Result<()>;
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn remove_file_if_exists(&self, path: &Path) -> io::Result<()>;
     fn open_and_sync_dir(&self, path: &Path) -> io::Result<()>;
@@ -50,13 +52,18 @@ impl FileSystem for RealFs {
     fn path_exists(&self, path: &Path) -> bool {
         path.exists()
     }
-    fn write_then_sync(&self, path: &Path, body: &[u8]) -> io::Result<()> {
+    fn write_then_sync(&self, path: &Path, body: &[u8], mode: Option<u32>) -> io::Result<()> {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        if let Some(m) = mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(m);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        let mut f = opts.open(path)?;
         f.write_all(body)?;
         f.sync_all()?;
         Ok(())
@@ -93,7 +100,7 @@ pub fn fsync_parent_dir(path: &Path) {
 }
 
 #[cfg(not(test))]
-fn record_public_fsync_call() {}
+const fn record_public_fsync_call() {}
 
 #[cfg(test)]
 fn record_public_fsync_call() {
@@ -103,7 +110,7 @@ fn record_public_fsync_call() {
 #[cfg(test)]
 pub(crate) mod public_fsync_calls {
     use std::sync::atomic::AtomicUsize;
-    pub(crate) static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    pub static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 }
 
 pub(crate) fn fsync_parent_dir_with_fs<F: FileSystem>(fs: &F, path: &Path) {
@@ -112,7 +119,10 @@ pub(crate) fn fsync_parent_dir_with_fs<F: FileSystem>(fs: &F, path: &Path) {
     }
 }
 
-/// Atomic bytes-to-file via temp + fsync + rename + parent-dir fsync. Single audited entry point for the temp+rename pattern; callers using this avoid the disallowed_methods lint by routing through here.
+/// Atomic bytes-to-file via temp + fsync + rename + parent-dir fsync.
+///
+/// Single audited entry point for the temp+rename pattern; callers using this
+/// avoid the `disallowed_methods` lint by routing through here.
 ///
 /// ```
 /// use ferrosonic::io_util::atomic_write_bytes;
@@ -121,14 +131,39 @@ pub(crate) fn fsync_parent_dir_with_fs<F: FileSystem>(fs: &F, path: &Path) {
 /// atomic_write_bytes(&p, b"hello").unwrap();
 /// assert_eq!(std::fs::read(&p).unwrap(), b"hello");
 /// ```
+///
+/// # Errors
+/// Returns an `io::Error` if the write, rename, or fsync fails.
 pub fn atomic_write_bytes(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    atomic_write_bytes_with_fs(&RealFs, path, body)
+    atomic_write_bytes_with_fs_mode(&RealFs, path, body, None)
 }
 
+/// Owner-only variant of [`atomic_write_bytes`] for secret-bearing files.
+///
+/// Creates the file with `0o600` on unix so a body holding a plaintext
+/// secret is not world-readable. The mode is applied to the temp file before
+/// any bytes are written, so there is no window where the secret is exposed.
+///
+/// # Errors
+/// Propagates any IO error from the create / write / rename sequence.
+pub fn atomic_write_bytes_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    atomic_write_bytes_with_fs_mode(&RealFs, path, body, Some(0o600))
+}
+
+#[cfg(test)]
 pub(crate) fn atomic_write_bytes_with_fs<F: FileSystem>(
     fs: &F,
     path: &Path,
     body: &[u8],
+) -> std::io::Result<()> {
+    atomic_write_bytes_with_fs_mode(fs, path, body, None)
+}
+
+pub(crate) fn atomic_write_bytes_with_fs_mode<F: FileSystem>(
+    fs: &F,
+    path: &Path,
+    body: &[u8],
+    mode: Option<u32>,
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !fs.path_exists(parent) {
@@ -136,8 +171,8 @@ pub(crate) fn atomic_write_bytes_with_fs<F: FileSystem>(
         }
     }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("dat");
-    let tmp = path.with_extension(format!("{}.tmp", ext));
-    if let Err(e) = fs.write_then_sync(&tmp, body) {
+    let tmp = path.with_extension(format!("{ext}.tmp"));
+    if let Err(e) = fs.write_then_sync(&tmp, body, mode) {
         let _ = fs.remove_file_if_exists(&tmp);
         return Err(e);
     }
@@ -160,6 +195,20 @@ mod atomic_write_bytes_smoke {
         let p = dir.path().join("x.toml");
         atomic_write_bytes(&p, b"hello").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_write_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("secret.toml");
+        atomic_write_bytes_private(&p, b"Password = \"hunter2\"").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "private write must be owner-only, got {mode:o}"
+        );
     }
 }
 
@@ -198,7 +247,7 @@ mod fault_injection_tests {
                 .create_dir_all
                 .push(path.to_path_buf());
             if self.fail_create_dir_all {
-                Err(io::Error::new(ErrorKind::Other, "synthetic create_dir_all"))
+                Err(io::Error::other("synthetic create_dir_all"))
             } else {
                 Ok(())
             }
@@ -207,16 +256,13 @@ mod fault_injection_tests {
             self.calls.borrow_mut().path_exists.push(path.to_path_buf());
             self.path_exists_response
         }
-        fn write_then_sync(&self, path: &Path, body: &[u8]) -> io::Result<()> {
+        fn write_then_sync(&self, path: &Path, body: &[u8], _mode: Option<u32>) -> io::Result<()> {
             self.calls
                 .borrow_mut()
                 .write_then_sync
                 .push((path.to_path_buf(), body.to_vec()));
             if self.fail_write_then_sync {
-                Err(io::Error::new(
-                    ErrorKind::Other,
-                    "synthetic write_then_sync",
-                ))
+                Err(io::Error::other("synthetic write_then_sync"))
             } else {
                 Ok(())
             }
@@ -227,7 +273,7 @@ mod fault_injection_tests {
                 .rename
                 .push((from.to_path_buf(), to.to_path_buf()));
             if self.fail_rename {
-                Err(io::Error::new(ErrorKind::Other, "synthetic rename"))
+                Err(io::Error::other("synthetic rename"))
             } else {
                 Ok(())
             }
@@ -238,7 +284,7 @@ mod fault_injection_tests {
                 .remove_file_if_exists
                 .push(path.to_path_buf());
             if self.fail_remove_file {
-                Err(io::Error::new(ErrorKind::Other, "synthetic remove"))
+                Err(io::Error::other("synthetic remove"))
             } else {
                 Ok(())
             }
@@ -249,7 +295,7 @@ mod fault_injection_tests {
                 .open_and_sync_dir
                 .push(path.to_path_buf());
             if self.fail_open_and_sync_dir {
-                Err(io::Error::new(ErrorKind::Other, "synthetic fsync"))
+                Err(io::Error::other("synthetic fsync"))
             } else {
                 Ok(())
             }

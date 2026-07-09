@@ -37,9 +37,8 @@ impl QueueSnapshot {
                 );
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let bad = path.with_extension(format!("json.bad.{}", stamp));
+                    .map_or(0, |d| d.as_secs());
+                let bad = path.with_extension(format!("json.bad.{stamp}"));
                 if let Err(rename_err) = std::fs::rename(&path, &bad) {
                     tracing::warn!("could not preserve corrupt snapshot: {}", rename_err);
                 }
@@ -49,6 +48,9 @@ impl QueueSnapshot {
     }
 
     /// Atomic write via temp-file + rename. Returns the path written.
+    ///
+    /// # Errors
+    /// Returns an error if the queue path cannot be resolved.
     pub fn save(&self) -> std::io::Result<PathBuf> {
         let path = crate::config::paths::queue_file()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no config dir"))?;

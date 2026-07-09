@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -20,6 +20,54 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
 
     render_playlists(frame, chunks[0], state, &colors);
     render_songs(frame, chunks[1], state, &colors);
+
+    if state.client.playlists.renaming {
+        let content = format!("{}\u{2588}", state.client.playlists.rename_buf);
+        render_edit_box(
+            frame,
+            chunks[0],
+            &content,
+            " Rename playlist  (Enter: save  Esc: cancel) ",
+            &colors,
+        );
+    } else if state.client.playlists.confirming_delete {
+        let name = state
+            .client
+            .playlists
+            .selected_playlist
+            .and_then(|i| state.daemon.library.playlists.get(i))
+            .map_or("", |p| p.name.as_str());
+        let content = format!("Delete '{name}'?  (y: confirm  n: cancel)");
+        render_edit_box(frame, chunks[0], &content, " Delete playlist ", &colors);
+    }
+}
+
+/// Draw a single-line input/confirmation box over the bottom of `area`.
+fn render_edit_box(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    content: &str,
+    title: &str,
+    colors: &ThemeColors,
+) {
+    let height = 3;
+    let width = area.width.saturating_sub(4).max(10);
+    let box_area = Rect {
+        x: area.x + 2,
+        y: area.y + area.height.saturating_sub(height + 1),
+        width,
+        height,
+    };
+    let para = Paragraph::new(content.to_string())
+        .style(Style::default().fg(colors.primary))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title.to_string())
+                .border_style(Style::default().fg(colors.primary)),
+        );
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(para, box_area);
 }
 
 fn render_playlists(
@@ -63,7 +111,7 @@ fn render_playlists(
             let duration = playlist.duration.map(|d| {
                 let mins = d / 60;
                 let secs = d % 60;
-                format!("{}:{:02}", mins, secs)
+                format!("{mins}:{secs:02}")
             });
 
             let style = if is_selected {
@@ -77,14 +125,14 @@ fn render_playlists(
             let mut spans = vec![
                 Span::styled(&playlist.name, style),
                 Span::styled(
-                    format!(" ({} songs)", count),
+                    format!(" ({count} songs)"),
                     Style::default().fg(colors.muted),
                 ),
             ];
 
             if let Some(dur) = duration {
                 spans.push(Span::styled(
-                    format!(" [{}]", dur),
+                    format!(" [{dur}]"),
                     Style::default().fg(colors.muted),
                 ));
             }
@@ -123,10 +171,10 @@ fn render_songs(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, col
         Style::default().fg(colors.border_unfocused)
     };
 
-    let title = if !playlists.songs.is_empty() {
-        format!(" Songs ({}) ", playlists.songs.len())
-    } else {
+    let title = if playlists.songs.is_empty() {
         " Songs ".to_string()
+    } else {
+        format!(" Songs ({}) ", playlists.songs.len())
     };
 
     let block = Block::default()
@@ -148,10 +196,7 @@ fn render_songs(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, col
         .enumerate()
         .map(|(i, song)| {
             let is_selected = focused && playlists.selected_song == Some(i);
-            let is_playing = state
-                .current_song()
-                .map(|s| s.id == song.id)
-                .unwrap_or(false);
+            let is_playing = state.current_song().is_some_and(|s| s.id == song.id);
 
             let indicator = if is_playing { "▶ " } else { "  " };
             let artist = song.artist.clone().unwrap_or_default();
@@ -172,12 +217,12 @@ fn render_songs(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, col
             let line = Line::from(vec![
                 Span::styled(indicator, Style::default().fg(colors.playing)),
                 Span::styled(&song.title, Style::default().fg(title_color)),
-                if !artist.is_empty() {
-                    Span::styled(format!(" - {}", artist), Style::default().fg(artist_color))
-                } else {
+                if artist.is_empty() {
                     Span::raw("")
+                } else {
+                    Span::styled(format!(" - {artist}"), Style::default().fg(artist_color))
                 },
-                Span::styled(format!(" [{}]", duration), Style::default().fg(time_color)),
+                Span::styled(format!(" [{duration}]"), Style::default().fg(time_color)),
             ]);
 
             ListItem::new(line)

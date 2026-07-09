@@ -24,12 +24,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>) {
     render_songs(frame, chunks[1], state, &colors);
 }
 
-fn render_options(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &mut AppState<'_>,
-    colors: &ThemeColors,
-) {
+fn render_options(frame: &mut Frame<'_>, area: Rect, state: &AppState<'_>, colors: &ThemeColors) {
     let focus = state.client.songs.focus;
     let selected_option = state
         .client
@@ -70,7 +65,7 @@ fn render_options(
 
     if focused {
         highlight_style = highlight_style.bg(colors.highlight_bg);
-    };
+    }
 
     list = list.highlight_style(highlight_style);
 
@@ -103,10 +98,7 @@ fn render_songs(frame: &mut Frame<'_>, area: Rect, state: &mut AppState<'_>, col
         .map(|(i, song)| {
             let is_selected = Some(i) == songs_ui.selected_index && focused;
 
-            let is_playing = state
-                .current_song()
-                .map(|s| s.id == song.id)
-                .unwrap_or(false);
+            let is_playing = state.current_song().is_some_and(|s| s.id == song.id);
 
             let line = get_song_with_artist_line(song, is_selected, is_playing, colors);
             ListItem::new(line)

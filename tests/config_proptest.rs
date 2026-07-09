@@ -24,7 +24,13 @@ fn arb_config() -> impl Strategy<Value = Config> {
         arb_repeat_mode(),
         any::<bool>(),
         any::<u8>(),
-        (any::<bool>(), any::<bool>(), any::<u32>()),
+        (
+            any::<bool>(),
+            any::<bool>(),
+            any::<u32>(),
+            any::<Option<i64>>(),
+            any::<bool>(),
+        ),
     )
         .prop_map(
             |(
@@ -39,12 +45,20 @@ fn arb_config() -> impl Strategy<Value = Config> {
                 repeat_mode,
                 cover_art,
                 cover_art_size,
-                (scrobble, notifications, rate_switch_delay_ms),
+                (
+                    scrobble,
+                    notifications,
+                    rate_switch_delay_ms,
+                    music_folder_id,
+                    music_folder_chosen,
+                ),
             )| Config {
                 base_url,
                 username,
                 password: password.into(),
                 password_file: None,
+                password_eval: None,
+                password_keyring: false,
                 theme,
                 cava,
                 cava_size,
@@ -56,6 +70,8 @@ fn arb_config() -> impl Strategy<Value = Config> {
                 scrobble,
                 notifications,
                 rate_switch_delay_ms,
+                music_folder_id,
+                music_folder_chosen,
             },
         )
 }

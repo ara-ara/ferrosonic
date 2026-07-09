@@ -3,10 +3,14 @@ use crossterm::event::{self, KeyCode};
 use crate::app::models::SongOption;
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest, EnqueueMode};
 
 impl App {
-    pub(super) async fn handle_songs_key(&mut self, key: event::KeyEvent) -> Result<(), Error> {
+    // Empty arms kept per-variant explicit; merging would hide which enum cases are handled.
+    #[allow(clippy::match_same_arms)]
+    // Cohesive single match/render; splitting would fragment one logical unit.
+    #[allow(clippy::too_many_lines)]
+    pub(super) async fn handle_songs_key(&self, key: event::KeyEvent) -> Result<(), Error> {
         let ds = self.daemon_state.read().await;
         let mut cs = self.client_state.write().await;
         let state = AppState {
@@ -35,6 +39,17 @@ impl App {
                         None => {}
                     };
                 }
+                0 => match state.client.songs.selected_option {
+                    Some(SongOption::Starred) => {}
+                    Some(SongOption::Random) => {
+                        state.client.songs.selected_option = Some(SongOption::Starred);
+                        let _ = state;
+                        drop(cs);
+                        drop(ds);
+                        let _ = self.client.request(DaemonRequest::RefreshStarred).await;
+                    }
+                    None => {}
+                },
                 1 => {
                     if let Some(sel) = state.client.songs.selected_index {
                         if sel > 0 {
@@ -67,6 +82,17 @@ impl App {
                         None => {}
                     };
                 }
+                0 => match state.client.songs.selected_option {
+                    Some(SongOption::Starred) => {
+                        state.client.songs.selected_option = Some(SongOption::Random);
+                        let _ = state;
+                        drop(cs);
+                        drop(ds);
+                        let _ = self.client.request(DaemonRequest::RefreshRandom).await;
+                    }
+                    Some(SongOption::Random) => {}
+                    None => {}
+                },
                 1 => {
                     let max = state.songs_list().len().saturating_sub(1);
                     if let Some(sel) = state.client.songs.selected_index {
@@ -91,7 +117,7 @@ impl App {
                 };
 
                 let songs = state.songs_list().to_vec();
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
 
@@ -108,7 +134,7 @@ impl App {
                     .map_err(Error::from);
             }
             KeyCode::Tab => {
-                state.client.songs.focus = if state.client.songs.focus == 1 { 0 } else { 1 }
+                state.client.songs.focus = usize::from(state.client.songs.focus != 1);
             }
             KeyCode::Left => {
                 state.client.songs.focus = 0;
@@ -125,13 +151,24 @@ impl App {
                     .songs
                     .selected_index
                     .and_then(|idx| state.songs_list().get(idx).map(|s| s.id.clone()));
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 if let Some(id) = song_id {
                     let _ = self.client.request(DaemonRequest::ToggleStarSong(id)).await;
                 }
                 return Ok(());
+            }
+            KeyCode::Char('a') => {
+                let idx = state.client.songs.selected_index;
+                let song = idx.and_then(|i| state.songs_list().get(i).cloned());
+                if let Some(song) = song {
+                    if state.daemon.library.playlists.is_empty() {
+                        state.client.notify("No playlists to add to");
+                    } else {
+                        state.client.open_playlist_picker(song);
+                    }
+                }
             }
             _ => {}
         }

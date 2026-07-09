@@ -26,6 +26,7 @@ pub struct LruCache<V> {
 
 impl<V: Clone> LruCache<V> {
     /// Empty cache.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
@@ -96,13 +97,22 @@ impl<V: Clone> LruCache<V> {
     /// c.insert("x".to_string(), (), 4);
     /// assert_eq!(c.len(), 1);
     /// ```
+    #[must_use]
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    /// Whether the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 
 /// Compatibility shim while the rest of the codebase still uses a
 /// bare `HashMap`. New code should use `LruCache` directly.
+// Transitional shim: default-hasher HashMap only; contains_key gates LRU reorder, not insert-if-absent.
+#[allow(clippy::implicit_hasher, clippy::map_entry)]
 pub fn cache_insert<V: Clone>(
     map: &mut HashMap<String, V>,
     order: &mut VecDeque<String>,
@@ -158,6 +168,9 @@ pub struct LibraryCache {
     pub album_songs_cache_order: VecDeque<String>,
     /// All playlists visible to the account.
     pub playlists: Vec<Playlist>,
+    /// Server libraries (music folders) for the library selector.
+    #[serde(default)]
+    pub music_folders: Vec<crate::subsonic::models::MusicFolder>,
     /// Song lists keyed by playlist ID.
     pub playlist_songs_cache: HashMap<String, Vec<Child>>,
     /// LRU order for `playlist_songs_cache`, least-recent first.

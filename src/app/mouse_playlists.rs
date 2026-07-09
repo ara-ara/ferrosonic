@@ -1,8 +1,10 @@
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest, EnqueueMode, LayoutAreas};
 
 impl App {
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub(super) async fn handle_playlists_click(
         &mut self,
         x: u16,
@@ -36,7 +38,7 @@ impl App {
                     let playlist = state.daemon.library.playlists[item_index].clone();
                     let playlist_id = playlist.id.clone();
                     let playlist_name = playlist.name.clone();
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
 
@@ -51,10 +53,9 @@ impl App {
                     state.client.playlists.songs = songs;
                     state.client.playlists.selected_song = if count > 0 { Some(0) } else { None };
                     state.client.playlists.focus = 1;
-                    state.client.notify(format!(
-                        "Loaded playlist: {} ({} songs)",
-                        playlist_name, count
-                    ));
+                    state
+                        .client
+                        .notify(format!("Loaded playlist: {playlist_name} ({count} songs)"));
                     self.last_click = Some((x, y, std::time::Instant::now()));
                     return Ok(());
                 }
@@ -79,7 +80,7 @@ impl App {
 
                 if is_second_click {
                     let songs = state.client.playlists.songs.clone();
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     self.last_click = Some((x, y, std::time::Instant::now()));

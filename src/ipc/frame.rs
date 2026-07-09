@@ -35,10 +35,11 @@ pub enum Frame {
     Event(DaemonEvent),
 }
 
-/// Result of a tolerant frame parse. Splits "couldn't parse the
-/// envelope" (fatal) from "envelope OK, payload type unknown" so the
-/// reader can recover from forward/back protocol mismatches without
-/// severing the connection.
+/// Result of a tolerant frame parse.
+///
+/// Splits "couldn't parse the envelope" (fatal) from "envelope OK, payload
+/// type unknown" so the reader can recover from forward/back protocol
+/// mismatches without severing the connection.
 #[derive(Debug)]
 pub enum FrameRead {
     /// Fully parsed; payload variant was known.
@@ -101,6 +102,9 @@ pub enum FrameError {
 ///     }
 /// });
 /// ```
+///
+/// # Errors
+/// Returns a `FrameError` if the frame is malformed or exceeds the size limit.
 pub async fn read_frame<R>(reader: &mut R) -> Result<Frame, FrameError>
 where
     R: AsyncReadExt + Unpin,
@@ -128,6 +132,9 @@ where
 ///     }
 /// });
 /// ```
+///
+/// # Errors
+/// Returns a `FrameError` if the frame is malformed or exceeds the size limit.
 pub async fn read_frame_lenient<R>(reader: &mut R) -> Result<FrameRead, FrameError>
 where
     R: AsyncReadExt + Unpin,
@@ -149,6 +156,9 @@ where
 ///     assert!(matches!(err, FrameError::TooLarge(n) if n == oversized_len as usize));
 /// });
 /// ```
+///
+/// # Errors
+/// Returns a `FrameError` if the frame is malformed or exceeds the size limit.
 pub async fn read_frame_lenient_with_cap<R>(
     reader: &mut R,
     cap: usize,
@@ -166,20 +176,18 @@ where
     let raw: serde_json::Value = serde_json::from_slice(&body)?;
 
     if let Some(req) = raw.get("Request") {
-        if let Some(id) = req.get("id").and_then(|v| v.as_u64()) {
+        if let Some(id) = req.get("id").and_then(serde_json::Value::as_u64) {
             let inner = req
                 .get("req")
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "<missing>".into());
+                .map_or_else(|| "<missing>".into(), std::string::ToString::to_string);
             return Ok(FrameRead::UnknownRequest { id, body: inner });
         }
     }
     if let Some(resp) = raw.get("Response") {
-        if let Some(id) = resp.get("id").and_then(|v| v.as_u64()) {
+        if let Some(id) = resp.get("id").and_then(serde_json::Value::as_u64) {
             let inner = resp
                 .get("payload")
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "<missing>".into());
+                .map_or_else(|| "<missing>".into(), std::string::ToString::to_string);
             return Ok(FrameRead::UnknownResponse { id, body: inner });
         }
     }
@@ -221,6 +229,9 @@ where
 }
 
 /// Single combined write so partial frames never reach the wire.
+///
+/// # Errors
+/// Returns a `FrameError` if the frame is malformed or exceeds the size limit.
 pub async fn write_frame<W>(writer: &mut W, frame: &Frame) -> Result<(), FrameError>
 where
     W: AsyncWriteExt + Unpin,
@@ -230,7 +241,10 @@ where
         return Err(FrameError::TooLarge(body.len()));
     }
     let mut buf = Vec::with_capacity(4 + body.len());
-    buf.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    // body.len() is checked <= MAX_FRAME_BYTES (16 MiB) above, so it fits u32 exactly.
+    #[allow(clippy::cast_possible_truncation)]
+    let len_prefix = (body.len() as u32).to_le_bytes();
+    buf.extend_from_slice(&len_prefix);
     buf.extend_from_slice(&body);
     writer.write_all(&buf).await?;
     writer.flush().await?;
@@ -254,7 +268,7 @@ mod tests {
         let decoded = read_frame(&mut reader).await.unwrap();
         match decoded {
             Frame::Request { id, req: _ } => assert_eq!(id, 42),
-            _ => panic!("expected Request, got {:?}", decoded),
+            _ => panic!("expected Request, got {decoded:?}"),
         }
     }
 
@@ -270,7 +284,7 @@ mod tests {
         let decoded = read_frame(&mut reader).await.unwrap();
         match decoded {
             Frame::Response { id, payload: Ok(_) } => assert_eq!(id, 7),
-            _ => panic!("expected Response Ok, got {:?}", decoded),
+            _ => panic!("expected Response Ok, got {decoded:?}"),
         }
     }
 
@@ -292,7 +306,7 @@ mod tests {
                 assert_eq!(id, 9);
                 assert_eq!(msg, "boom");
             }
-            _ => panic!("expected Response Err, got {:?}", decoded),
+            _ => panic!("expected Response Err, got {decoded:?}"),
         }
     }
 
@@ -306,7 +320,8 @@ mod tests {
     #[tokio::test]
     async fn frame_too_large_rejected() {
         let mut buf: Vec<u8> = Vec::new();
-        buf.extend_from_slice(&((MAX_FRAME_BYTES as u32 + 1).to_le_bytes()));
+        let over_max = u32::try_from(MAX_FRAME_BYTES).expect("MAX_FRAME_BYTES fits u32") + 1;
+        buf.extend_from_slice(&over_max.to_le_bytes());
         let mut reader = buf.as_slice();
         let err = read_frame(&mut reader).await.unwrap_err();
         assert!(matches!(err, FrameError::TooLarge(_)));
@@ -321,14 +336,16 @@ mod tests {
             }
         })
         .to_string();
-        let len = (body.len() as u32).to_le_bytes();
+        let len = u32::try_from(body.len())
+            .expect("test body fits u32")
+            .to_le_bytes();
         let mut buf = Vec::new();
         buf.extend_from_slice(&len);
         buf.extend_from_slice(body.as_bytes());
         let mut reader = buf.as_slice();
         match read_frame_lenient(&mut reader).await.unwrap() {
             FrameRead::UnknownRequest { id, .. } => assert_eq!(id, 99),
-            other => panic!("expected UnknownRequest, got {:?}", other),
+            other => panic!("expected UnknownRequest, got {other:?}"),
         }
     }
 }

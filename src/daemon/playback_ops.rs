@@ -8,7 +8,10 @@ use crate::daemon::core::{DaemonCore, PlayMode};
 use crate::error::Error;
 
 impl DaemonCore {
-    /// Toggle pause by current state: `Playing` pauses, `Paused` resumes, `Stopped` with a queued position starts playback. Delegates so the PipeWire pin release/re-apply lives in one place per direction.
+    /// Toggle pause by current state: `Playing` pauses, `Paused` resumes, `Stopped` with a queued position starts playback. Delegates so the `PipeWire` pin release/re-apply lives in one place per direction.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn toggle_pause(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
         let (playback_state, queue_pos) = {
@@ -26,6 +29,15 @@ impl DaemonCore {
     }
 
     /// Pause playback. Stops mpv so it disconnects its PipeWire stream and the audio device can re-rate to other apps; the playhead is kept in `now_playing.position` and resume reloads + seeks back. Commits `Paused` before the stop so the idle tick (gated on `is_playing`) cannot read the stop as a track-end and auto-advance.
+    /// Pause playback. Stops mpv so it disconnects its `PipeWire` stream and
+    /// releases the force-rate pin, so the audio device follows other apps
+    /// (e.g. a browser) while paused. The playhead is kept in
+    /// `now_playing.position`; resume re-pins the known rate then reloads and
+    /// seeks back. Commits `Paused` before the stop so the idle tick (gated on
+    /// `is_playing`) cannot read the stop as a track-end and auto-advance.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn pause_playback(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
         let was_playing = {
@@ -52,6 +64,12 @@ impl DaemonCore {
     }
 
     /// Resume from pause by reloading the current track and seeking back to the saved position (mpv was stopped on pause to free the audio device), which re-pins the rate via the normal play path. From `Stopped` with a queued position, starts that track from the top.
+    /// Resume from pause by reloading the current track and seeking back to the saved position (mpv was stopped on pause to free the audio device). Before audio, compares the device's current rate to the track's known rate; if they differ it switches and waits the settle delay so the re-clock finishes in silence, never in the music. From `Stopped` with a queued position, starts that track from the top.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn resume_playback(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
         let (playback_state, queue_pos, resume_at) = {
@@ -79,6 +97,9 @@ impl DaemonCore {
     }
 
     /// Manual skip. Ignores `repeat=One` (user wants to move).
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn next_track(self: &Arc<Self>) -> Result<(), Error> {
         let (queue_len, current_pos, auto_continue, repeat) = {
             let state = self.state.read().await;
@@ -92,23 +113,22 @@ impl DaemonCore {
         if queue_len == 0 {
             return Ok(());
         }
-        let next_pos: Option<usize> = match current_pos {
-            Some(p) => repeat.next_manual(p, queue_len),
-            None => Some(0),
-        };
+        let next_pos: Option<usize> =
+            current_pos.map_or(Some(0), |p| repeat.next_manual(p, queue_len));
         if let Some(p) = next_pos {
             return self.play_queue_position(p, PlayMode::Direct).await;
         }
-        if auto_continue {
-            if self.extend_with_random_and_play().await? {
-                return Ok(());
-            }
+        if auto_continue && self.extend_with_random_and_play().await? {
+            return Ok(());
         }
         self.finish_at_queue_end().await;
         Ok(())
     }
 
     /// Auto-end advance. Honours `repeat=One` and `repeat=All`.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn advance_auto(self: &Arc<Self>) -> Result<(), Error> {
         let (queue_len, current_pos, auto_continue, repeat) = {
             let state = self.state.read().await;
@@ -122,23 +142,22 @@ impl DaemonCore {
         if queue_len == 0 {
             return Ok(());
         }
-        let next_pos: Option<usize> = match current_pos {
-            Some(p) => repeat.next_auto(p, queue_len),
-            None => Some(0),
-        };
+        let next_pos: Option<usize> =
+            current_pos.map_or(Some(0), |p| repeat.next_auto(p, queue_len));
         if let Some(p) = next_pos {
             return self.play_queue_position(p, PlayMode::Direct).await;
         }
-        if auto_continue {
-            if self.extend_with_random_and_play().await? {
-                return Ok(());
-            }
+        if auto_continue && self.extend_with_random_and_play().await? {
+            return Ok(());
         }
         self.finish_at_queue_end().await;
         Ok(())
     }
 
     /// Restarts current track if more than 3s in, else goes back one.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn prev_track(self: &Arc<Self>) -> Result<(), Error> {
         let (queue_len, current_pos, position, repeat) = {
             let state = self.state.read().await;
@@ -183,6 +202,9 @@ impl DaemonCore {
     }
 
     /// Load and play the queue entry at `pos` from the start; drives the `PipeWire` rate switch.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn play_queue_position(
         self: &Arc<Self>,
         pos: usize,
@@ -210,7 +232,7 @@ impl DaemonCore {
             let mut state = self.state.write().await;
             match self.commit_play_state_in_lock(&mut state, &client, pos) {
                 Ok(v) => v,
-                Err(_) => return Ok(()),
+                Err(()) => return Ok(()),
             }
         };
 
@@ -231,6 +253,8 @@ impl DaemonCore {
     }
 
     /// Repeat-aware: loads current for One, wraps for All, no-ops at the end for Off.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn preload_next_track(self: &Arc<Self>, current_pos: usize) {
         let next_song = {
             let state = self.state.read().await;
@@ -254,21 +278,35 @@ impl DaemonCore {
 
         debug!("Pre-loading next track for gapless: {}", next_song.title);
         let mut mpv = self.mpv.lock().await;
+        let mut mpv = self.mpv.lock().await;
+        // A newer loadfile (concurrent play or a tick advance) superseded this
+        // preload's current track; skip so a stale next never lands in slot 1.
+        if self.loadfile_gen.load(std::sync::atomic::Ordering::Acquire) != gen {
+            debug!("preload superseded by a newer load; skipping append");
+            return;
+        }
+        // Single-flight: append a next track only when the current track is the lone playlist entry; the mpv lock serializes racing preloads so a double-append (count 3) cannot desync the gapless advance.
+        match mpv.get_playlist_count().await {
+            Ok(1) => {}
+            Ok(c) => {
+                debug!("preload skip: playlist count {c} != 1 (next already loaded or idle)");
+                return;
+            }
+            Err(e) => {
+                debug!("preload skip: playlist count query failed: {e}");
+                return;
+            }
+        }
         if let Err(e) = mpv.loadfile_append(&url).await {
             debug!("Failed to pre-load next track: {}", e);
-        } else if let Ok(count) = mpv.get_playlist_count().await {
-            if count < 2 {
-                warn!(
-                    "Preload may have failed: playlist count is {} (expected 2)",
-                    count
-                );
-            } else {
-                debug!("Preload confirmed: playlist count is {}", count);
-            }
+        } else {
+            debug!("Preload appended next track; playlist count now 2");
         }
     }
 
     /// Re-align mpv's preloaded next track with the current queue after a queue mutation, so a gapless advance plays the queue's next track and not a stale preload. No-op unless actively `Playing`; drops mpv's slot-1 preload and re-preloads the repeat-aware next.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn resync_gapless_preload(self: &Arc<Self>) {
         use crate::daemon::state::PlaybackState;
         let pos = {
@@ -292,7 +330,9 @@ impl DaemonCore {
         self.preload_next_track(pos).await;
     }
 
-    /// End-of-queue stop: halt mpv, mark `Stopped`, emit, and release the PipeWire pin so the idle daemon stops holding the device at the last track's rate.
+    /// End-of-queue stop: halt mpv, mark `Stopped`, emit, and release the `PipeWire` pin so the idle daemon stops holding the device at the last track's rate.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     async fn finish_at_queue_end(self: &Arc<Self>) {
         use crate::daemon::state::PlaybackState;
         info!("Reached end of queue");
@@ -310,6 +350,9 @@ impl DaemonCore {
     }
 
     /// Stop playback, unload the track, and broadcast the state change.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn stop_playback(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
         {
@@ -337,6 +380,9 @@ impl DaemonCore {
     }
 
     /// MPRIS / Stop-button semantics: halt playback but keep the queue and current selection intact so Play can resume the same track.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
     pub async fn stop_keep_queue(self: &Arc<Self>) -> Result<(), Error> {
         use crate::daemon::state::PlaybackState;
         {
@@ -380,6 +426,11 @@ impl DaemonCore {
     }
 
     /// Seek to an absolute position in seconds.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn seek(self: &Arc<Self>, pos: f64) -> Result<(), Error> {
         let mut mpv = self.mpv.lock().await;
         if let Err(e) = mpv.seek(pos).await {
@@ -393,6 +444,11 @@ impl DaemonCore {
     }
 
     /// Seek by a signed offset in seconds.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn seek_relative(self: &Arc<Self>, offset: f64) -> Result<(), Error> {
         let mut mpv = self.mpv.lock().await;
         let _ = mpv.seek_relative(offset).await;
@@ -400,6 +456,11 @@ impl DaemonCore {
     }
 
     /// Set mpv volume as a percentage.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control or a server request fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn set_volume(self: &Arc<Self>, vol: i32) -> Result<(), Error> {
         let mut mpv = self.mpv.lock().await;
         let _ = mpv.set_volume(vol).await;

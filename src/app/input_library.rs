@@ -1,17 +1,21 @@
-//! Library page input. Single match in `handle_library_key` covers one tree-of-mixed-items view plus a filter overlay; splitting by key would fragment one match across files.
+//! Library page input. `handle_library_key` routes the overlay/mode keys (filter, view-toggle, folder-cycle, album-list) to focused sub-handlers, then runs one cohesive match over the tree-of-mixed-items view.
 use crossterm::event::{self, KeyCode};
 use tracing::info;
 
 use crate::app::page_state::{AlbumSort, LibraryView};
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest, EnqueueMode};
 
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 
 impl App {
-    pub(super) async fn handle_library_key(&mut self, key: event::KeyEvent) -> Result<(), Error> {
+    // Cohesive tree/song key-match; the filter, view, folder, and album-list overlays already route out to sub-handlers. The remaining single match stays intact (splitting it adds per-arm allows, not clarity).
+    #[allow(clippy::too_many_lines)]
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
+    pub(super) async fn handle_library_key(&self, key: event::KeyEvent) -> Result<(), Error> {
         use crate::ui::pages::library::{build_tree_items, TreeItem};
 
         let ds = self.daemon_state.read().await;
@@ -24,122 +28,33 @@ impl App {
         };
 
         if state.client.artists.filter_active {
-            let mut scope_or_query_changed = false;
-            match key.code {
-                KeyCode::Esc => {
-                    state.client.artists.filter_active = false;
-                    state.client.artists.filter.clear();
-                    state.client.artists.search_results = None;
-                    drop(state);
-                    drop(cs);
-                    drop(ds);
-                    return Ok(());
-                }
-                KeyCode::Enter => {
-                    state.client.artists.filter_active = false;
-                    drop(state);
-                    drop(cs);
-                    drop(ds);
-                    return Ok(());
-                }
-                KeyCode::Backspace => {
-                    state.client.artists.filter.pop();
-                    scope_or_query_changed = true;
-                }
-                KeyCode::Char(c) => {
-                    state.client.artists.filter.push(c);
-                    scope_or_query_changed = true;
-                }
-                _ => {}
-            }
-            if !scope_or_query_changed {
-                drop(state);
-                drop(cs);
-                drop(ds);
-                return Ok(());
-            }
-            state.client.artists.search_gen = state.client.artists.search_gen.wrapping_add(1);
-            let gen = state.client.artists.search_gen;
-            let query = state.client.artists.filter.clone();
-            drop(state);
+            let _ = state;
             drop(cs);
             drop(ds);
-            if query.is_empty() {
-                let mut cs = self.client_state.write().await;
-                cs.artists.search_results = None;
-                return Ok(());
-            }
-            let client = self.client.clone();
-            let client_state = self.client_state.clone();
-            tokio::spawn(async move {
-                let resp = client
-                    .request(DaemonRequest::Search {
-                        query,
-                        artist_count: 100,
-                        album_count: 100,
-                        song_count: 200,
-                    })
-                    .await;
-                if let Ok(crate::ipc::DaemonResponse::SearchResults(r)) = resp {
-                    let mut cs = client_state.write().await;
-                    // Stale: user typed again since this request was issued.
-                    if cs.artists.search_gen == gen {
-                        cs.artists.search_results = Some(r);
-                    }
-                }
-            });
-            return Ok(());
+            return self.handle_library_filter_key(key).await;
         }
 
         // 'v' toggles the left pane between the artist tree and the flat album
         // list; switching to the list loads it from the daemon on first use.
-        if let KeyCode::Char('v') = key.code {
-            let to_album = state.client.artists.view == LibraryView::ArtistTree;
-            state.client.artists.view = if to_album {
-                LibraryView::AlbumList
-            } else {
-                LibraryView::ArtistTree
-            };
-            let need_load = to_album && state.client.artists.albums.is_empty();
-            let sort = state.client.artists.album_sort;
-            drop(state);
+        if key.code == KeyCode::Char('v') {
+            let _ = state;
             drop(cs);
             drop(ds);
-            if need_load {
-                // Fetch off the input path so a large library doesn't freeze the UI.
-                let client = self.client.clone();
-                let client_state = self.client_state.clone();
-                tokio::spawn(async move {
-                    let albums = match client.request(DaemonRequest::LoadAllAlbums).await {
-                        Ok(crate::ipc::DaemonResponse::AllAlbums(a)) => a,
-                        _ => Vec::new(),
-                    };
-                    let first_id = {
-                        let mut cs = client_state.write().await;
-                        cs.artists.albums = albums;
-                        sort_albums(&mut cs.artists.albums, sort);
-                        cs.artists.album_selected = (!cs.artists.albums.is_empty()).then_some(0);
-                        cs.artists.album_scroll_offset = 0;
-                        cs.artists.albums.first().map(|a| a.id.clone())
-                    };
-                    if let Some(id) = first_id {
-                        if let Ok(crate::ipc::DaemonResponse::AlbumSongs(songs)) =
-                            client.request(DaemonRequest::LoadAlbum(id)).await
-                        {
-                            let mut cs = client_state.write().await;
-                            cs.artists.selected_song = (!songs.is_empty()).then_some(0);
-                            cs.artists.songs = songs;
-                        }
-                    }
-                });
-            }
-            return Ok(());
+            return self.handle_library_view_toggle().await;
+        }
+
+        // 'f' cycles the active library (music folder): All, then each folder.
+        if key.code == KeyCode::Char('f') {
+            let _ = state;
+            drop(cs);
+            drop(ds);
+            return self.handle_library_folder_cycle().await;
         }
 
         // Album-list view, left pane: dedicated album navigation. Right-pane
         // (focus == 1) song keys fall through to the shared match below.
         if state.client.artists.view == LibraryView::AlbumList && state.client.artists.focus == 0 {
-            drop(state);
+            let _ = state;
             drop(cs);
             drop(ds);
             return self.handle_album_list_key(key).await;
@@ -178,7 +93,7 @@ impl App {
                     );
                     state.client.artists.selected_index = sel;
                     let item = sel.and_then(|i| tree_items.get(i).cloned());
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     self.load_pane_for_tree_item(item).await;
@@ -198,7 +113,7 @@ impl App {
                         step_tree_selection(&tree_items, state.client.artists.selected_index, true);
                     state.client.artists.selected_index = sel;
                     let item = sel.and_then(|i| tree_items.get(i).cloned());
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     self.load_pane_for_tree_item(item).await;
@@ -226,7 +141,7 @@ impl App {
                                 let artist_id = artist.id.clone();
                                 let artist_name = artist.name.clone();
 
-                                drop(state);
+                                let _ = state;
                                 drop(cs);
                                 drop(ds);
 
@@ -253,8 +168,7 @@ impl App {
                                             client: &mut cs,
                                         };
                                         state.client.notify_error(format!(
-                                            "No songs found for {}",
-                                            artist_name,
+                                            "No songs found for {artist_name}",
                                         ));
                                         return Ok(());
                                     }
@@ -270,8 +184,7 @@ impl App {
                                             client: &mut cs,
                                         };
                                         state.client.notify(format!(
-                                            "Shuffling {} songs by {}",
-                                            song_count, artist_name
+                                            "Shuffling {song_count} songs by {artist_name}"
                                         ));
                                     }
 
@@ -290,7 +203,7 @@ impl App {
                                 let album_id = album.id.clone();
                                 let album_name = album.name.clone();
 
-                                drop(state);
+                                let _ = state;
                                 drop(cs);
                                 drop(ds);
 
@@ -316,7 +229,7 @@ impl App {
                                         daemon: &ds,
                                         client: &mut cs,
                                     };
-                                    state.client.notify(format!("Shuffling {}", album_name));
+                                    state.client.notify(format!("Shuffling {album_name}"));
                                 }
 
                                 return self
@@ -332,7 +245,7 @@ impl App {
                             TreeItem::Song { song } => {
                                 let song = song.clone();
                                 let title = song.title.clone();
-                                drop(state);
+                                let _ = state;
                                 drop(cs);
                                 drop(ds);
                                 {
@@ -342,7 +255,7 @@ impl App {
                                         daemon: &ds,
                                         client: &mut cs,
                                     };
-                                    state.client.notify(format!("Playing: {}", title));
+                                    state.client.notify(format!("Playing: {title}"));
                                 }
                                 return self
                                     .client
@@ -380,34 +293,33 @@ impl App {
                                         .albums_cache
                                         .contains_key(&artist_id)
                                     {
-                                        drop(state);
+                                        let _ = state;
                                         drop(cs);
                                         drop(ds);
-                                        match self
-                                            .client
-                                            .request(DaemonRequest::LoadArtist(artist_id.clone()))
-                                            .await
+                                        if let Ok(crate::ipc::DaemonResponse::ArtistAlbums(_)) =
+                                            self.client
+                                                .request(DaemonRequest::LoadArtist(
+                                                    artist_id.clone(),
+                                                ))
+                                                .await
                                         {
-                                            Ok(crate::ipc::DaemonResponse::ArtistAlbums(_)) => {
-                                                // Cache + AlbumsChanged event already emitted by daemon.
-                                                let ds = self.daemon_state.read().await;
-                                                let mut cs = self.client_state.write().await;
-                                                let state = AppState {
-                                                    daemon: &ds,
-                                                    client: &mut cs,
-                                                };
-                                                state.client.artists.expanded.insert(artist_id);
-                                                info!("Loaded albums for {}", artist_name);
-                                            }
-                                            _ => {
-                                                let ds = self.daemon_state.read().await;
-                                                let mut cs = self.client_state.write().await;
-                                                let state = AppState {
-                                                    daemon: &ds,
-                                                    client: &mut cs,
-                                                };
-                                                state.client.notify_error("Failed to load artist");
-                                            }
+                                            // Cache + AlbumsChanged event already emitted by daemon.
+                                            let ds = self.daemon_state.read().await;
+                                            let mut cs = self.client_state.write().await;
+                                            let state = AppState {
+                                                daemon: &ds,
+                                                client: &mut cs,
+                                            };
+                                            state.client.artists.expanded.insert(artist_id);
+                                            info!("Loaded albums for {}", artist_name);
+                                        } else {
+                                            let ds = self.daemon_state.read().await;
+                                            let mut cs = self.client_state.write().await;
+                                            let state = AppState {
+                                                daemon: &ds,
+                                                client: &mut cs,
+                                            };
+                                            state.client.notify_error("Failed to load artist");
                                         }
                                         return Ok(());
                                     } else {
@@ -417,7 +329,7 @@ impl App {
                                 TreeItem::Album { album } => {
                                     let album_id = album.id.clone();
                                     let album_name = album.name.clone();
-                                    drop(state);
+                                    let _ = state;
                                     drop(cs);
                                     drop(ds);
 
@@ -441,12 +353,11 @@ impl App {
                                             client: &mut cs,
                                         };
                                         let count = songs.len();
-                                        state.client.artists.songs = songs.clone();
+                                        state.client.artists.songs.clone_from(&songs);
                                         state.client.artists.selected_song = Some(0);
                                         state.client.artists.focus = 1;
                                         state.client.notify(format!(
-                                            "Playing album: {} ({} songs)",
-                                            album_name, count
+                                            "Playing album: {album_name} ({count} songs)"
                                         ));
                                     }
                                     let _ = self
@@ -461,7 +372,7 @@ impl App {
                                 TreeItem::Song { song } => {
                                     let song = song.clone();
                                     let title = song.title.clone();
-                                    drop(state);
+                                    let _ = state;
                                     drop(cs);
                                     drop(ds);
                                     {
@@ -471,7 +382,7 @@ impl App {
                                             daemon: &ds,
                                             client: &mut cs,
                                         };
-                                        state.client.notify(format!("Playing: {}", title));
+                                        state.client.notify(format!("Playing: {title}"));
                                     }
                                     let _ = self
                                         .client
@@ -492,7 +403,7 @@ impl App {
                         if let Some(song) = songs.get(idx) {
                             state.client.notify(format!("Playing: {}", song.title));
                         }
-                        drop(state);
+                        let _ = state;
                         drop(cs);
                         drop(ds);
                         let _ = self
@@ -516,8 +427,8 @@ impl App {
                     if let Some(idx) = state.client.artists.selected_song {
                         if let Some(song) = state.client.artists.songs.get(idx).cloned() {
                             let title = song.title.clone();
-                            state.client.notify(format!("Added to queue: {}", title));
-                            drop(state);
+                            state.client.notify(format!("Added to queue: {title}"));
+                            let _ = state;
                             drop(cs);
                             drop(ds);
                             let _ = self
@@ -536,7 +447,7 @@ impl App {
                     let tree_items = build_tree_items(&state);
                     if let Some(idx) = state.client.artists.selected_index {
                         if let Some(item) = tree_items.get(idx).cloned() {
-                            drop(state);
+                            let _ = state;
                             drop(cs);
                             drop(ds);
                             let songs = self.collect_songs_for(&item).await;
@@ -549,9 +460,7 @@ impl App {
                                         daemon: &ds,
                                         client: &mut cs,
                                     };
-                                    state
-                                        .client
-                                        .notify(format!("Added {} songs to queue", count));
+                                    state.client.notify(format!("Added {count} songs to queue"));
                                 }
                                 let _ = self
                                     .client
@@ -567,10 +476,8 @@ impl App {
                 } else if !state.client.artists.songs.is_empty() {
                     let count = state.client.artists.songs.len();
                     let songs = state.client.artists.songs.clone();
-                    state
-                        .client
-                        .notify(format!("Added {} songs to queue", count));
-                    drop(state);
+                    state.client.notify(format!("Added {count} songs to queue"));
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     let _ = self
@@ -588,14 +495,12 @@ impl App {
                     if let Some(idx) = state.client.artists.selected_song {
                         if let Some(song) = state.client.artists.songs.get(idx).cloned() {
                             let title = song.title.clone();
-                            state.client.notify(format!("Playing next: {}", title));
-                            drop(state);
+                            state.client.notify(format!("Playing next: {title}"));
+                            let _ = state;
                             drop(cs);
                             drop(ds);
-                            let mode = match cur_pos {
-                                Some(pos) => EnqueueMode::InsertAfter(pos),
-                                None => EnqueueMode::Append,
-                            };
+                            let mode =
+                                cur_pos.map_or(EnqueueMode::Append, EnqueueMode::InsertAfter);
                             let _ = self
                                 .client
                                 .request(DaemonRequest::EnqueueSongs {
@@ -612,7 +517,7 @@ impl App {
                     let tree_items = build_tree_items(&state);
                     if let Some(idx) = state.client.artists.selected_index {
                         if let Some(item) = tree_items.get(idx).cloned() {
-                            drop(state);
+                            let _ = state;
                             drop(cs);
                             drop(ds);
                             let songs = self.collect_songs_for(&item).await;
@@ -625,12 +530,10 @@ impl App {
                                         daemon: &ds,
                                         client: &mut cs,
                                     };
-                                    state.client.notify(format!("Playing {} songs next", count));
+                                    state.client.notify(format!("Playing {count} songs next"));
                                 }
-                                let mode = match cur_pos {
-                                    Some(pos) => EnqueueMode::InsertAfter(pos),
-                                    None => EnqueueMode::Append,
-                                };
+                                let mode =
+                                    cur_pos.map_or(EnqueueMode::Append, EnqueueMode::InsertAfter);
                                 let _ = self
                                     .client
                                     .request(DaemonRequest::EnqueueSongs { songs, mode })
@@ -642,14 +545,11 @@ impl App {
                 } else if !state.client.artists.songs.is_empty() {
                     let count = state.client.artists.songs.len();
                     let songs = state.client.artists.songs.clone();
-                    state.client.notify(format!("Playing {} songs next", count));
-                    drop(state);
+                    state.client.notify(format!("Playing {count} songs next"));
+                    let _ = state;
                     drop(cs);
                     drop(ds);
-                    let mode = match cur_pos {
-                        Some(pos) => EnqueueMode::InsertAfter(pos),
-                        None => EnqueueMode::Append,
-                    };
+                    let mode = cur_pos.map_or(EnqueueMode::Append, EnqueueMode::InsertAfter);
                     let _ = self
                         .client
                         .request(DaemonRequest::EnqueueSongs { songs, mode })
@@ -662,13 +562,24 @@ impl App {
                     .artists
                     .selected_song
                     .and_then(|idx| state.client.artists.songs.get(idx).map(|s| s.id.clone()));
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 if let Some(id) = song_id {
                     let _ = self.client.request(DaemonRequest::ToggleStarSong(id)).await;
                 }
                 return Ok(());
+            }
+            KeyCode::Char('a') if state.client.artists.focus == 1 => {
+                let idx = state.client.artists.selected_song;
+                let song = idx.and_then(|i| state.client.artists.songs.get(i).cloned());
+                if let Some(song) = song {
+                    if state.daemon.library.playlists.is_empty() {
+                        state.client.notify("No playlists to add to");
+                    } else {
+                        state.client.open_playlist_picker(song);
+                    }
+                }
             }
             KeyCode::Char('m')
                 if state.client.artists.focus == 0
@@ -685,7 +596,7 @@ impl App {
                         TreeItem::Song { song } => Some(song.id.clone()),
                         _ => None,
                     });
-                drop(state);
+                let _ = state;
                 drop(cs);
                 drop(ds);
                 if let Some(id) = song_id {
@@ -699,8 +610,176 @@ impl App {
         Ok(())
     }
 
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
+    async fn handle_library_filter_key(&self, key: event::KeyEvent) -> Result<(), Error> {
+        let ds = self.daemon_state.read().await;
+        let mut cs = self.client_state.write().await;
+        let state = AppState {
+            daemon: &ds,
+            client: &mut cs,
+        };
+        let mut scope_or_query_changed = false;
+        match key.code {
+            KeyCode::Esc => {
+                state.client.artists.filter_active = false;
+                state.client.artists.filter.clear();
+                state.client.artists.search_results = None;
+                let _ = state;
+                drop(cs);
+                drop(ds);
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                state.client.artists.filter_active = false;
+                let _ = state;
+                drop(cs);
+                drop(ds);
+                return Ok(());
+            }
+            KeyCode::Backspace => {
+                state.client.artists.filter.pop();
+                scope_or_query_changed = true;
+            }
+            KeyCode::Char(c) => {
+                state.client.artists.filter.push(c);
+                scope_or_query_changed = true;
+            }
+            _ => {}
+        }
+        if !scope_or_query_changed {
+            let _ = state;
+            drop(cs);
+            drop(ds);
+            return Ok(());
+        }
+        state.client.artists.search_gen = state.client.artists.search_gen.wrapping_add(1);
+        let gen = state.client.artists.search_gen;
+        let query = state.client.artists.filter.clone();
+        let _ = state;
+        drop(cs);
+        drop(ds);
+        if query.is_empty() {
+            let mut cs = self.client_state.write().await;
+            cs.artists.search_results = None;
+            return Ok(());
+        }
+        let client = self.client.clone();
+        let client_state = self.client_state.clone();
+        tokio::spawn(async move {
+            let resp = client
+                .request(DaemonRequest::Search {
+                    query,
+                    artist_count: 100,
+                    album_count: 100,
+                    song_count: 200,
+                })
+                .await;
+            if let Ok(crate::ipc::DaemonResponse::SearchResults(r)) = resp {
+                let mut cs = client_state.write().await;
+                // Stale: user typed again since this request was issued.
+                if cs.artists.search_gen == gen {
+                    cs.artists.search_results = Some(r);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn handle_library_view_toggle(&self) -> Result<(), Error> {
+        let ds = self.daemon_state.read().await;
+        let mut cs = self.client_state.write().await;
+        let state = AppState {
+            daemon: &ds,
+            client: &mut cs,
+        };
+        let to_album = state.client.artists.view == LibraryView::ArtistTree;
+        state.client.artists.view = if to_album {
+            LibraryView::AlbumList
+        } else {
+            LibraryView::ArtistTree
+        };
+        let need_load = to_album && state.client.artists.albums.is_empty();
+        let sort = state.client.artists.album_sort;
+        let _ = state;
+        drop(cs);
+        drop(ds);
+        if need_load {
+            // Fetch off the input path so a large library doesn't freeze the UI.
+            let client = self.client.clone();
+            let client_state = self.client_state.clone();
+            tokio::spawn(async move {
+                let albums = match client.request(DaemonRequest::LoadAllAlbums).await {
+                    Ok(crate::ipc::DaemonResponse::AllAlbums(a)) => a,
+                    _ => Vec::new(),
+                };
+                let first_id = {
+                    let mut cs = client_state.write().await;
+                    cs.artists.albums = albums;
+                    sort_albums(&mut cs.artists.albums, sort);
+                    cs.artists.album_selected = (!cs.artists.albums.is_empty()).then_some(0);
+                    cs.artists.album_scroll_offset = 0;
+                    cs.artists.albums.first().map(|a| a.id.clone())
+                };
+                if let Some(id) = first_id {
+                    if let Ok(crate::ipc::DaemonResponse::AlbumSongs(songs)) =
+                        client.request(DaemonRequest::LoadAlbum(id)).await
+                    {
+                        let mut cs = client_state.write().await;
+                        cs.artists.selected_song = (!songs.is_empty()).then_some(0);
+                        cs.artists.songs = songs;
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+
+    async fn handle_library_folder_cycle(&self) -> Result<(), Error> {
+        let ds = self.daemon_state.read().await;
+        let mut cs = self.client_state.write().await;
+        let state = AppState {
+            daemon: &ds,
+            client: &mut cs,
+        };
+        let folders = &state.daemon.library.music_folders;
+        if folders.is_empty() {
+            let _ = state;
+            drop(cs);
+            drop(ds);
+            return Ok(());
+        }
+        let options: Vec<Option<i64>> = std::iter::once(None)
+            .chain(folders.iter().map(|f| Some(f.id)))
+            .collect();
+        let cur = state.daemon.config.music_folder_id;
+        let idx = options.iter().position(|o| *o == cur).unwrap_or(0);
+        let next = options[(idx + 1) % options.len()];
+        // Label fallback; explicit None=>"All" reads clearer than map_or_else here.
+        #[allow(clippy::option_if_let_else)]
+        let label = match next {
+            None => "All".to_string(),
+            Some(id) => folders
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| f.name.clone())
+                .unwrap_or_default(),
+        };
+        state.client.notify(format!("Library: {label}"));
+        let _ = state;
+        drop(cs);
+        drop(ds);
+        let _ = self
+            .client
+            .request(DaemonRequest::SetMusicFolder(next))
+            .await;
+        Ok(())
+    }
+
     /// Key handling for the flat album list (left pane, focus == 0).
-    async fn handle_album_list_key(&mut self, key: event::KeyEvent) -> Result<(), Error> {
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
+    async fn handle_album_list_key(&self, key: event::KeyEvent) -> Result<(), Error> {
         match key.code {
             KeyCode::Char('s') => {
                 {
@@ -817,7 +896,7 @@ impl App {
             _ => {
                 let ds = self.daemon_state.read().await;
                 let mut cs = self.client_state.write().await;
-                cs.artists.songs = ds.queue.clone();
+                cs.artists.songs.clone_from(&ds.queue);
                 cs.artists.selected_song = ds.queue_position;
             }
         }
@@ -825,7 +904,7 @@ impl App {
 
     /// Load the currently-selected album's songs into the right pane so it
     /// follows the album-list cursor (focus stays on the list).
-    pub(super) async fn load_selected_album_into_pane(&mut self) {
+    pub(super) async fn load_selected_album_into_pane(&self) {
         let id = {
             let cs = self.client_state.read().await;
             cs.artists
@@ -842,7 +921,7 @@ impl App {
     }
 
     async fn collect_songs_for(
-        &mut self,
+        &self,
         item: &crate::ui::pages::library::TreeItem,
     ) -> Vec<crate::subsonic::models::Child> {
         use crate::ui::pages::library::TreeItem;
@@ -873,7 +952,7 @@ impl App {
 fn sort_albums(albums: &mut [crate::subsonic::models::Album], sort: AlbumSort) {
     match sort {
         AlbumSort::Name => {
-            albums.sort_by(|a, b| album_sort_key(&a.name).cmp(&album_sort_key(&b.name)));
+            albums.sort_by_key(|a| album_sort_key(&a.name));
         }
         AlbumSort::ReleaseDate => albums.sort_by_key(|a| a.sort_year().unwrap_or(i32::MAX)),
     }

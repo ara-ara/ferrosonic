@@ -98,7 +98,7 @@ pub enum AlbumSort {
 impl AlbumSort {
     /// The next sort in the cycle.
     #[must_use]
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
             Self::Name => Self::ReleaseDate,
             Self::ReleaseDate => Self::Name,
@@ -143,6 +143,23 @@ pub struct PlaylistsState {
     pub playlist_scroll_offset: usize,
     /// First visible row of the song pane.
     pub song_scroll_offset: usize,
+    /// True while the rename box is capturing input.
+    pub renaming: bool,
+    /// New playlist name being typed in the rename box.
+    pub rename_buf: String,
+    /// True while the delete-confirmation prompt is showing.
+    pub confirming_delete: bool,
+}
+
+/// Overlay state for adding a song to a playlist, opened from any song pane.
+#[derive(Debug, Clone, Default)]
+pub struct PlaylistPicker {
+    /// True while the picker overlay is capturing input.
+    pub active: bool,
+    /// Highlighted playlist index in the picker list.
+    pub selected: usize,
+    /// The song queued to be added once a playlist is chosen.
+    pub song: Option<Child>,
 }
 
 /// UI state of the Server (credentials) page.
@@ -162,6 +179,8 @@ pub struct ServerState {
 
 /// UI state of the Settings page.
 #[derive(Debug, Clone)]
+// Independent settings toggles mirroring the config; orthogonal on/off flags.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SettingsState {
     /// Index of the focused settings row.
     pub selected_field: usize,
@@ -207,27 +226,30 @@ impl Default for SettingsState {
 
 impl SettingsState {
     /// Name of the active theme.
+    #[must_use]
     pub fn theme_name(&self) -> &str {
         &self.themes[self.theme_index].name
     }
 
     /// Color palette of the active theme.
+    #[must_use]
     pub fn theme_colors(&self) -> &ThemeColors {
         &self.themes[self.theme_index].colors
     }
 
     /// The active theme.
+    #[must_use]
     pub fn current_theme(&self) -> &ThemeData {
         &self.themes[self.theme_index]
     }
 
     /// Advance to the next theme, wrapping at the end.
-    pub fn next_theme(&mut self) {
+    pub const fn next_theme(&mut self) {
         self.theme_index = (self.theme_index + 1) % self.themes.len();
     }
 
     /// Step back to the previous theme, wrapping at the start.
-    pub fn prev_theme(&mut self) {
+    pub const fn prev_theme(&mut self) {
         self.theme_index = (self.theme_index + self.themes.len() - 1) % self.themes.len();
     }
 

@@ -1,8 +1,12 @@
 use crate::error::Error;
 
-use super::*;
+use super::{App, AppState, DaemonRequest, EnqueueMode, LayoutAreas};
 
 impl App {
+    // Cohesive single match/render; splitting would fragment one logical unit.
+    #[allow(clippy::too_many_lines)]
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub(super) async fn handle_library_click(
         &mut self,
         x: u16,
@@ -49,34 +53,32 @@ impl App {
                             if was_expanded {
                                 state.client.artists.expanded.remove(&artist_id);
                             } else if !state.daemon.library.albums_cache.contains_key(&artist_id) {
-                                drop(state);
+                                let _ = state;
                                 drop(cs);
                                 drop(ds);
                                 let albums_resp = self
                                     .client
                                     .request(DaemonRequest::LoadArtist(artist_id.clone()))
                                     .await;
-                                match albums_resp {
-                                    Ok(crate::ipc::DaemonResponse::ArtistAlbums(_)) => {
-                                        // Cache + AlbumsChanged already emitted by daemon.
-                                        let ds = self.daemon_state.read().await;
-                                        let mut cs = self.client_state.write().await;
-                                        let state = AppState {
-                                            daemon: &ds,
-                                            client: &mut cs,
-                                        };
-                                        state.client.artists.expanded.insert(artist_id);
-                                        tracing::info!("Loaded albums for {}", artist_name);
-                                    }
-                                    _ => {
-                                        let ds = self.daemon_state.read().await;
-                                        let mut cs = self.client_state.write().await;
-                                        let state = AppState {
-                                            daemon: &ds,
-                                            client: &mut cs,
-                                        };
-                                        state.client.notify_error("Failed to load artist");
-                                    }
+                                if let Ok(crate::ipc::DaemonResponse::ArtistAlbums(_)) = albums_resp
+                                {
+                                    // Cache + AlbumsChanged already emitted by daemon.
+                                    let ds = self.daemon_state.read().await;
+                                    let mut cs = self.client_state.write().await;
+                                    let state = AppState {
+                                        daemon: &ds,
+                                        client: &mut cs,
+                                    };
+                                    state.client.artists.expanded.insert(artist_id);
+                                    tracing::info!("Loaded albums for {}", artist_name);
+                                } else {
+                                    let ds = self.daemon_state.read().await;
+                                    let mut cs = self.client_state.write().await;
+                                    let state = AppState {
+                                        daemon: &ds,
+                                        client: &mut cs,
+                                    };
+                                    state.client.notify_error("Failed to load artist");
                                 }
                                 self.last_click = Some((x, y, std::time::Instant::now()));
                                 return Ok(());
@@ -87,7 +89,7 @@ impl App {
                         TreeItem::Album { album } => {
                             let album_id = album.id.clone();
                             let album_name = album.name.clone();
-                            drop(state);
+                            let _ = state;
                             drop(cs);
                             drop(ds);
 
@@ -112,13 +114,12 @@ impl App {
                                     client: &mut cs,
                                 };
                                 let count = songs.len();
-                                state.client.artists.songs = songs.clone();
+                                state.client.artists.songs.clone_from(&songs);
                                 state.client.artists.selected_song = Some(0);
                                 state.client.artists.focus = 1;
-                                state.client.notify(format!(
-                                    "Playing album: {} ({} songs)",
-                                    album_name, count
-                                ));
+                                state
+                                    .client
+                                    .notify(format!("Playing album: {album_name} ({count} songs)"));
                             }
                             let _ = self
                                 .client
@@ -133,7 +134,7 @@ impl App {
                         TreeItem::Song { song } => {
                             let song = song.clone();
                             let title = song.title.clone();
-                            drop(state);
+                            let _ = state;
                             drop(cs);
                             drop(ds);
                             {
@@ -143,7 +144,7 @@ impl App {
                                     daemon: &ds,
                                     client: &mut cs,
                                 };
-                                state.client.notify(format!("Playing: {}", title));
+                                state.client.notify(format!("Playing: {title}"));
                             }
                             let _ = self
                                 .client
@@ -159,7 +160,7 @@ impl App {
                     }
                 } else if let TreeItem::Album { album } = &tree_items[item_index] {
                     let album_id = album.id.clone();
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     let songs = self.load_album(&album_id).await;
@@ -200,7 +201,7 @@ impl App {
                     if let Some(song) = songs.get(item_index) {
                         state.client.notify(format!("Playing: {}", song.title));
                     }
-                    drop(state);
+                    let _ = state;
                     drop(cs);
                     drop(ds);
                     let _ = self

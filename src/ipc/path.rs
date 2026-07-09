@@ -2,7 +2,7 @@
 //!
 //! Order: `$FERROSONIC_SOCK` →
 //! `$XDG_RUNTIME_DIR/ferrosonic/ferrosonicd.sock` →
-//! `/tmp/ferrosonic-{uid}/ferrosonicd.sock`. AF_UNIX caps at 108 bytes.
+//! `/tmp/ferrosonic-{uid}/ferrosonicd.sock`. `AF_UNIX` caps at 108 bytes.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ const SOCKET_FILENAME: &str = "ferrosonicd.sock";
 const SUBDIR: &str = "ferrosonic";
 
 /// Resolve the daemon socket path per the order documented above.
+#[must_use]
 pub fn socket_path() -> PathBuf {
     if let Ok(custom) = std::env::var("FERROSONIC_SOCK") {
         return PathBuf::from(custom);
@@ -25,13 +26,16 @@ pub fn socket_path() -> PathBuf {
     }
     let uid = unsafe { libc::getuid() };
     let mut p = PathBuf::from("/tmp");
-    p.push(format!("ferrosonic-{}", uid));
+    p.push(format!("ferrosonic-{uid}"));
     p.push(SOCKET_FILENAME);
     p
 }
 
-/// chmod 0700 only when we created the directory; XDG_RUNTIME_DIR is
+/// chmod 0700 only when we created the directory; `XDG_RUNTIME_DIR` is
 /// already restricted and /tmp must not be touched.
+///
+/// # Errors
+/// Returns an `io::Error` if the runtime directory cannot be prepared.
 pub fn ensure_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let Some(parent) = path.parent() else {
@@ -51,6 +55,9 @@ pub fn ensure_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Poll until connect succeeds or `timeout` elapses.
+///
+/// # Errors
+/// Returns an `io::Error` if the runtime directory cannot be prepared.
 pub async fn wait_for_socket(path: &Path, timeout: Duration) -> std::io::Result<()> {
     let deadline = Instant::now() + timeout;
     let mut delay = Duration::from_millis(25);

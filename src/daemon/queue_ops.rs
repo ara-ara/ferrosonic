@@ -10,6 +10,11 @@ use crate::ipc::protocol::DaemonEvent;
 
 impl DaemonCore {
     /// Replace queue + play target under a single state write lock so the queue cannot be mutated between the swap and the play setup. If `play_from` is None, only the queue is replaced.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control fails.
+    // significant_drop_tightening: tokio guard held to scope; not tightened (early-drop is borrow-blocked, spans a trailing await, or saves nothing before return).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn replace_queue_and_play(
         self: &Arc<Self>,
         songs: Vec<crate::subsonic::models::Child>,
@@ -63,6 +68,8 @@ impl DaemonCore {
         }
         let song = state.queue.remove(from);
         state.queue.insert(to, song);
+        // The Some branch mutates queue_position; if-let is clearer than a mutating map_or_else closure.
+        #[allow(clippy::option_if_let_else)]
         let next_maybe_changed = if let Some(cur) = state.queue_position {
             let new_cur = if cur == from {
                 to
@@ -105,6 +112,9 @@ impl DaemonCore {
     }
 
     /// Replace the queue with a shuffled random-songs batch and start playing.
+    ///
+    /// # Errors
+    /// Returns an `Error` if mpv control fails.
     pub async fn shuffle_library(self: &Arc<Self>) -> Result<(), Error> {
         let Some(client) = self.subsonic.read().await.clone() else {
             return Ok(());
@@ -115,7 +125,7 @@ impl DaemonCore {
             Err(e) => {
                 error!("Failed to load random songs: {}", e);
                 self.emit(DaemonEvent::Notification {
-                    message: format!("Failed to shuffle library: {}", e),
+                    message: format!("Failed to shuffle library: {e}"),
                     is_error: true,
                 });
                 return Ok(());
@@ -123,8 +133,8 @@ impl DaemonCore {
         };
         {
             let mut state = self.state.write().await;
-            state.library.random_songs = songs.clone();
-            state.queue = songs.clone();
+            state.library.random_songs.clone_from(&songs);
+            state.queue.clone_from(&songs);
             state.queue_position = None;
         }
         self.emit(DaemonEvent::RandomChanged(songs));

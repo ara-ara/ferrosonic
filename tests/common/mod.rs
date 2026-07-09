@@ -1,5 +1,7 @@
 //! Shared test harness. Imported via `mod common;` in each test.
 
+// Each integration-test binary compiles this whole harness but uses only a
+// subset of its helpers; dead_code/unused_imports here are structural, not real.
 #![allow(dead_code, unused_imports)]
 
 pub mod fake_mpv;
@@ -24,6 +26,9 @@ pub use test_daemon::TestDaemon;
 /// reclaims any leak older than an hour, so runs never accumulate.
 pub fn tempdir() -> tempfile::TempDir {
     static SWEEP: std::sync::Once = std::sync::Once::new();
+    // Every fixture funnels through here; block the daemon's desktop notifications
+    // so the suite (re-run hundreds of times under cargo-mutants) cannot spam D-Bus.
+    std::env::set_var("FERROSONIC_NO_DESKTOP_NOTIFY", "1");
     let root = std::env::temp_dir().join("ferrosonic-test");
     let _ = std::fs::create_dir_all(&root);
     SWEEP.call_once(|| sweep_stale_test_dirs(&root));

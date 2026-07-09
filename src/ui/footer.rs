@@ -22,7 +22,8 @@ pub struct Footer<'a> {
 
 impl<'a> Footer<'a> {
     /// Footer for `page` with the theme palette.
-    pub fn new(page: Page, colors: ThemeColors) -> Self {
+    #[must_use]
+    pub const fn new(page: Page, colors: ThemeColors) -> Self {
         Self {
             page,
             sample_rate: None,
@@ -33,19 +34,22 @@ impl<'a> Footer<'a> {
     }
 
     /// Builder: show the active sample rate.
-    pub fn sample_rate(mut self, rate: Option<u32>) -> Self {
+    #[must_use]
+    pub const fn sample_rate(mut self, rate: Option<u32>) -> Self {
         self.sample_rate = rate;
         self
     }
 
     /// Builder: show a transient notification.
-    pub fn notification(mut self, notification: Option<&'a Notification>) -> Self {
+    #[must_use]
+    pub const fn notification(mut self, notification: Option<&'a Notification>) -> Self {
         self.notification = notification;
         self
     }
 
     /// Builder: show the repeat mode indicator.
-    pub fn repeat_mode(mut self, mode: crate::config::RepeatMode) -> Self {
+    #[must_use]
+    pub const fn repeat_mode(mut self, mode: crate::config::RepeatMode) -> Self {
         self.repeat_mode = mode;
         self
     }
@@ -83,6 +87,7 @@ impl<'a> Footer<'a> {
                 s("/", "Search"),
                 s("←/→", "Focus"),
                 s("v", "Albums/Artists"),
+                s("f", "Library"),
                 s("s", "Sort"),
                 s("e", "Add"),
                 s("i", "Add next"),
@@ -100,13 +105,15 @@ impl<'a> Footer<'a> {
                 s("Enter", "Play"),
             ],
             Page::Playlists => vec![
-                s("n", "Star playing"),
-                s("m", "Star selected"),
-                s("←/→", "Focus"),
-                s("e", "Add"),
-                s("i", "Add next"),
-                s("t", "Shuffle play"),
                 s("Enter", "Play"),
+                s("e/i", "Queue"),
+                s("a", "→ Playlist"),
+                s("R", "Rename"),
+                s("D", "Delete"),
+                s("d", "Remove"),
+                s("J/K", "Reorder"),
+                s("t", "Shuffle"),
+                s("m", "Star"),
             ],
             Page::Server => vec![
                 s("Tab", "Next field"),
@@ -158,13 +165,23 @@ impl Widget for Footer<'_> {
         }
 
         if let Some(rate) = self.sample_rate {
-            let khz = rate as f64 / 1000.0;
+            let khz = f64::from(rate) / 1000.0;
+            // Exact integer-value check; floor() is exact, an epsilon compare would be wrong.
+            #[allow(clippy::float_cmp)]
             let rate_str = if khz == khz.floor() {
-                format!("{}kHz", khz as u32)
+                {
+                    // f64->u32 `as` saturates; khz is a positive sample-rate/1000.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let khz_int = khz as u32;
+                    format!("{khz_int}kHz")
+                }
             } else {
-                format!("{:.1}kHz", khz)
+                format!("{khz:.1}kHz")
             };
-            let x = right.x + right.width.saturating_sub(rate_str.len() as u16);
+            let x = right.x
+                + right
+                    .width
+                    .saturating_sub(crate::num::u16_sat(rate_str.len()));
             buf.set_string(
                 x,
                 right.y,
@@ -184,7 +201,7 @@ impl Widget for Footer<'_> {
                     Style::default().fg(self.colors.success)
                 };
                 let msg: String = notif.message.chars().take(right.width as usize).collect();
-                let msg_len = msg.chars().count() as u16;
+                let msg_len = crate::num::u16_sat(msg.chars().count());
                 let x = right.x + right.width.saturating_sub(msg_len);
                 buf.set_string(x, right.y + 1, &msg, style);
             }
