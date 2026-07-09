@@ -194,7 +194,7 @@ impl App {
                     let req = match option {
                         SongOption::Starred => DaemonRequest::RefreshStarred,
                         SongOption::Random => DaemonRequest::RefreshRandom,
-                        SongOption::Random => DaemonRequest::RefreshRandomAlbums,
+                        SongOption::RandomAlbums => DaemonRequest::RefreshRandomAlbums,
                     };
                     let _ = self.client.request(req).await;
                 }
