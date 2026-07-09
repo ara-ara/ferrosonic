@@ -673,7 +673,7 @@ impl MpvController {
     /// Returns an `AudioError` if the mpv IPC command fails.
     pub async fn get_audio_format(&mut self) -> Result<Option<String>, AudioError> {
         let data = self
-            .send_command(vec![json!("get_property"), json!("audio-params/format")])
+            .send_command(vec![json!("get_property"), json!("file-format")])
             .await?;
         Ok(data.and_then(|v| v.as_str().map(String::from)))
     }
