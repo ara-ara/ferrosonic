@@ -80,6 +80,10 @@ impl DaemonClient for InProcessClient {
                 core.refresh_random().await;
                 Ok(DaemonResponse::Ok)
             }
+            DaemonRequest::RefreshRandomAlbums => {
+                self.core.refresh_random_albums().await;
+                Ok(DaemonResponse::Ok)
+            }
             DaemonRequest::RefreshArtists => {
                 core.refresh_artists().await;
                 core.refresh_music_folders().await;

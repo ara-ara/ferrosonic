@@ -380,6 +380,25 @@ impl SubsonicClient {
         Ok(songs)
     }
 
+    /// Fetch a batch of 100 random albums.
+    pub async fn get_random_albums(&self) -> Result<Vec<Child>, SubsonicError> {
+        const PAGE: u32 = 100;
+        //let mut album_list: Vec<Album> = Vec::new();
+        let offset = 0;
+        let album_list: Vec<Album> = self
+                .get_album_list2("random", PAGE, offset)
+                .await?;
+
+        let mut song_list: Vec<Child> = Vec::new();
+        for album in album_list.into_iter() {
+            let (_a, s) = self.get_album(&album.id).await?;
+            song_list.extend(s);   
+        }
+
+        debug!("Fetched {} songs", song_list.len());
+        Ok(song_list)
+    }
+    
     /// Fetch the full artist index, flattened across index letters.
     ///
     /// # Errors

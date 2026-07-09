@@ -60,6 +60,8 @@ pub enum DaemonRequest {
     RefreshStarred,
     /// Re-fetch the random-songs list from the server.
     RefreshRandom,
+    /// Re-fetch the random-albums list from the server.
+    RefreshRandomAlbums,
     /// Re-fetch the artist index from the server.
     RefreshArtists,
     /// Re-fetch the playlist list from the server.

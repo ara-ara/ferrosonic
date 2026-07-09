@@ -28,6 +28,13 @@ impl App {
                         drop(ds);
                         let _ = self.client.request(DaemonRequest::RefreshStarred).await;
                     }
+                    Some(SongOption::RandomAlbums) => {
+                        state.client.songs.selected_option = Some(SongOption::Random);
+                        let _ = state;
+                        drop(cs);
+                        drop(ds);
+                        let _ = self.client.request(DaemonRequest::RefreshRandom).await;                            
+                    }
                     None => {}
                 },
                 1 => {
@@ -50,7 +57,14 @@ impl App {
                         drop(ds);
                         let _ = self.client.request(DaemonRequest::RefreshRandom).await;
                     }
-                    Some(SongOption::Random) => {}
+                    Some(SongOption::Random) => {
+                        state.client.songs.selected_option = Some(SongOption::RandomAlbums);
+                        let _ = state;
+                        drop(cs);
+                        drop(ds);
+                        let _ = self.client.request(DaemonRequest::RefreshRandomAlbums).await;
+                    }
+                    Some(SongOption::RandomAlbums) => {}
                     None => {}
                 },
                 1 => {
